@@ -2,7 +2,7 @@ services:
   codearts2api:
     build: .
     # 也可以直接用已发布的镜像：
-    # image: ghcr.io/moguqaq/codearts2api:latest
+    # image: ghcr.io/mogumc/codearts2api:latest
     container_name: codearts2api
     restart: unless-stopped
     ports:
