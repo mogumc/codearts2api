@@ -38,6 +38,8 @@ type Server struct {
 }
 
 // New 构造代理服务。
+//
+// client 需已绑定 CodeArts 通道的签名 host（见 config.Endpoints.CodeArtsHost）。
 func New(cfg *config.Config, cat *catalog.Catalog, client *upstream.Client) *Server {
 	return &Server{
 		cfg:     cfg,

@@ -184,27 +184,32 @@ Authorization: Bearer sk-你的密钥1
 
 基址会在启动时校验：必须是带主机名的 `http`/`https` 地址，且不含查询串或锚点。末尾斜杠会被自动去掉，带路径前缀的基址（如 `https://gw.example.com/codearts`）会被保留。配置非法时进程直接退出并给出具体原因。
 
-### 通过中转/反向代理访问
+**签名 host 自动跟随基址**：改 `BASE_URL` 即可，无需额外配置——签名用的 host 就是该基址的域名。
 
-华为云网关按它**收到的 Host 头**验签。若你通过中转域名访问，签名里的 host 必须是上游真实域名，否则验签失败，表现为：
+### 通过代理 / 反向代理访问
+
+华为云网关按它**收到的 Host 头**验签。若连接地址与上游真实域名不同，签名里的 host 必须写上游真实域名，否则验签失败，表现为：
 
 ```text
 401 {"error_code":"APIG.0301","error_msg":"Incorrect IAM authentication information: x-auth-token not found"}
 ```
 
-此时需要**同时**配置基址与签名 host：
+此时用 `CODEARTS_BASE_HOST` / `CODEARTS_OPENGW_BASE_HOST` 显式指定签名 host：
 
 ```ini
-# 实际连接的地址（中转）
-CODEARTS_BASE_URL=https://relay.example.com/codearts
-CODEARTS_OPENGW_BASE_URL=https://relay.example.com/opengw
+# 实际连接的地址（代理）
+CODEARTS_BASE_URL=https://proxy.example.com/codearts
+CODEARTS_OPENGW_BASE_URL=https://proxy.example.com/opengw
 
 # 签名用的上游真实域名
 CODEARTS_BASE_HOST=snap-access.cn-north-4.myhuaweicloud.com
 CODEARTS_OPENGW_BASE_HOST=opengw.developer.huaweicloud.com
 ```
 
-两个基址的域名不同，因此**分别配置**。直连官方地址时这两项留空即可，签名 host 会自动取 `BASE_URL` 的域名（默认行为与配置签名 host 前完全一致）。
+两个通道的域名不同，因此**分别配置**。不配这两项时，签名 host 自动取对应 `BASE_URL` 的域名。
+
+> [!NOTE]
+> 两个通道各自持有独立的客户端，签名 host 在启动时就已确定，不依赖请求 URL 反查。
 
 `CODEARTS_BASE_HOST` 只接受主机名（可带端口），不接受协议前缀或路径——写错会让签名静默失效，所以这里宁可报错。
 
@@ -278,7 +283,7 @@ codearts2api/
 - **非流式兜底**：CodeArts 在排队或重试时可能即使 `stream=false` 仍返回 SSE，代理统一聚合成单个 JSON 再返回。
 - **超时策略**：不使用 `http.Client.Timeout`（它是整个请求的总超时，会切断长时间流式输出），改用 Transport 级响应头超时 + 非流式请求的 context 超时。
 - **端点可配置**：所有上游地址收敛到 `config.Endpoints`，基址与签名 host 均可由环境变量覆盖；启动时校验合法性，非法配置立即退出而非运行到一半才报错。
-- **连接与签名解耦**：签名用的 host 独立于连接地址，支持中转/反代场景；未配置时回退为「用请求 URL 的 host 签名」，与原有行为完全一致。
+- **连接与签名解耦**：每个上游通道持有独立的签名客户端，签名 host 在启动时确定。替换 `BASE_URL` 时自动跟随新域名；用代理时由 `*_BASE_HOST` 显式覆盖。
 - **下游鉴权**：可选的 Bearer 密钥校验，常量时间比较；未配置时不鉴权以保持本机便利。
 
 ## 说明

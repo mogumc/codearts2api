@@ -40,25 +40,17 @@ func SDKDate(now time.Time) string {
 	return now.UTC().Format(sdkDateFormat)
 }
 
-// Sign 计算签名并返回可写入 HTTP 请求的头部集合（使用当前 UTC 时间）。
+// SignForHost 计算签名并返回可写入 HTTP 请求的头部集合。
 //
-// method 为 HTTP 方法，rawURL 为完整请求 URL（含查询串），body 为请求体，
-// extraHeaders 为需要参与签名的附加头。返回值包含 host / content-type /
-// x-sdk-date / Authorization 等头，调用方直接用于发起请求。
-func (c *Credentials) Sign(method, rawURL string, body []byte, extraHeaders map[string]string) map[string]string {
-	return c.SignAt(time.Now(), method, rawURL, "", body, extraHeaders)
-}
-
-// SignForHost 与 Sign 相同，但显式指定参与签名的 host。
-//
-// 使用场景：通过反向代理/中转访问上游时，连接地址与上游认定的域名不一致。
-// 上游网关按它收到的 Host 头验签，因此签名里的 host 必须写上游真实域名，
-// 而不是中转域名——否则验签失败（表现为 401 / APIG.0301）。
+// signedHost 指定参与签名的 host，传空串表示取 rawURL 的 host。
+// 需要显式指定 host 的场景：通过反向代理/中转访问上游时，连接地址与上游
+// 认定的域名不一致。上游网关按它收到的 Host 头验签，因此签名里的 host 必须
+// 写上游真实域名，而不是中转域名——否则验签失败（表现为 401 / APIG.0301）。
 func (c *Credentials) SignForHost(method, rawURL, signedHost string, body []byte, extraHeaders map[string]string) map[string]string {
 	return c.SignAt(time.Now(), method, rawURL, signedHost, body, extraHeaders)
 }
 
-// SignAt 与 Sign 相同，但使用调用方指定的时间生成 x-sdk-date，便于测试复现。
+// SignAt 与 SignForHost 相同，但使用调用方指定的时间生成 x-sdk-date，便于测试复现。
 //
 // signedHost 为空时取 rawURL 的 host（默认行为）；非空时以其为准，
 // 并同时作为实际发出的 Host 头，保证"签什么就发什么"。
@@ -75,15 +67,6 @@ func (c *Credentials) SignAt(now time.Time, method, rawURL, signedHost string, b
 	headers["Authorization"] = Algorithm + " Access=" + c.AK +
 		", SignedHeaders=" + SignedHeaderNames(headers) + ", Signature=" + signature
 	return headers
-}
-
-// StringToSign 暴露待签串构造，供测试与排查使用。
-func (c *Credentials) StringToSign(now time.Time, method, rawURL, signedHost string, body []byte, extraHeaders map[string]string) string {
-	headers := c.canonicalHeaders(rawURL, signedHost, extraHeaders)
-	sdkDate := SDKDate(now)
-	headers["x-sdk-date"] = sdkDate
-	parsed := parseURL(rawURL)
-	return Algorithm + "\n" + sdkDate + "\n" + sha256Hex([]byte(CanonicalRequest(method, parsed, headers, body)))
 }
 
 // canonicalHeaders 组装参与签名的头集合。

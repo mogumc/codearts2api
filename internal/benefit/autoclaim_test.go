@@ -335,25 +335,54 @@ func TestIsAlreadyClaimed(t *testing.T) {
 		"today already claimed",
 		"Repeated claim",
 		"duplicate request",
+		"claimed",
+		"already claimed",
 		"今日已领取",
 		"已经签到过了",
 		"重复签到",
+		"重复领取",
 	}
 	for _, message := range positives {
 		if !isAlreadyClaimed(errString(message)) {
 			t.Errorf("isAlreadyClaimed(%q) = false, 应为 true", message)
 		}
 	}
-	negatives := []string{
+
+	// 否定语义：含 claimed/already 等正面词，但语义是「尚未领取/领取失败」。
+	// 这批文案一旦被判成已签到，当天不会再重试，直接丢掉一天额度。
+	negated := []string{
+		"benefit not claimed",
+		"quota unclaimed",
+		"claim failed, nothing claimed",
+		"error: not yet claimed today",
+		"today's benefit is not claimed",
+		"cannot claim now",
+		"never claimed",
+		"领取失败",
+		"签到失败",
+		"尚未领取",
+		"没有签到",
+		"无法领取",
+	}
+	for _, message := range negated {
+		if isAlreadyClaimed(errString(message)) {
+			t.Errorf("isAlreadyClaimed(%q) = true, 否定语义应判为 false", message)
+		}
+	}
+
+	// 不含正面关键词的普通失败。
+	plainFailures := []string{
 		"service unavailable",
 		"IAM service is currently unavailable",
 		"network timeout",
+		"",
 	}
-	for _, message := range negatives {
+	for _, message := range plainFailures {
 		if isAlreadyClaimed(errString(message)) {
 			t.Errorf("isAlreadyClaimed(%q) = true, 应为 false", message)
 		}
 	}
+
 	if isAlreadyClaimed(nil) {
 		t.Error("nil 不应被判定为已领取")
 	}

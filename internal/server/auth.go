@@ -24,17 +24,13 @@ func (a AuthConfig) Enabled() bool { return len(a.Keys) > 0 }
 // 未配置密钥时直接放行（默认行为，方便本机使用）。
 // 配置了密钥后，所有 /v1/* 请求都必须携带正确的 Bearer 密钥。
 //
-// 注意：OPTIONS 预检不校验——浏览器预检请求不会带自定义头，
-// 拦截它会导致跨域调用直接失败。
+// 不处理 OPTIONS 预检：外层 withCORS 已经短路了预检请求，进不到这里。
+// 预检本身也不带自定义头，鉴权层即使收到也不该拦。
 func withAuth(cfg AuthConfig, next http.Handler) http.Handler {
 	if !cfg.Enabled() {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			next.ServeHTTP(w, r)
-			return
-		}
 		if !cfg.authorized(r) {
 			writeAuthError(w)
 			return

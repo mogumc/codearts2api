@@ -138,14 +138,20 @@ func (a *AutoClaimer) claimAsync() {
 // 避免当天反复重试，也不会把状态标记成异常。
 //
 // 判断刻意保持保守：误判的代价是把「真实失败」当成已签到，从而丢掉一天的
-// 额度。因此中文不枚举具体文案，而是要求同时出现「动作」与「已完成/重复」
-// 两种语义——这样「已签到」「已经签到过了」「重复领取」都能命中，而
-// 「签到失败」「领取超时」不会误判。
+// 额度。所以先排除否定语义，再要求出现「已领取」关键词。
+//
+// 必须排除否定语义的原因：claimed 会命中 "not claimed" / "unclaimed" /
+// "nothing claimed" 这类「尚未领取」的表述，把它们当成已签到会让当天不再
+// 重试，直接丢掉一天额度。
 func isAlreadyClaimed(err error) bool {
 	if err == nil {
 		return false
 	}
 	message := strings.ToLower(err.Error())
+
+	if hasNegatedClaim(message) {
+		return false
+	}
 
 	for _, keyword := range []string{"already", "repeated", "duplicate", "claimed"} {
 		if strings.Contains(message, keyword) {
@@ -153,9 +159,31 @@ func isAlreadyClaimed(err error) bool {
 		}
 	}
 
+	// 中文不枚举具体文案，要求同时出现「动作」与「已完成/重复」两种语义——
+	// 「已签到」「已经签到过了」「重复领取」都能命中，「签到失败」「领取超时」不会。
 	hasAction := strings.Contains(message, "签到") || strings.Contains(message, "领取")
 	hasDone := strings.Contains(message, "已") || strings.Contains(message, "重复")
 	return hasAction && hasDone
+}
+
+// hasNegatedClaim 判断消息是否表达「尚未/未能领取」。
+//
+// 只在消息含正面关键词时才可能走到这里，因此这里只需拦住「含正面词但语义
+// 是否定」的表述。不收录泛化的 fail/error —— 那些消息不含 claimed/already
+// 等正面词，本来就返回 false；收进来反而会误伤 "claim failed: already claimed"
+// 这类把已领取包在失败描述里的文案。
+func hasNegatedClaim(message string) bool {
+	for _, keyword := range []string{
+		// 英文否定
+		"not ", "not_", "cannot", "never", "unclaimed", "no claim", "nothing claimed",
+		// 中文否定：「已经领取失败」含「已」和「领取」，必须靠否定词拦住
+		"未", "没", "失败", "无法", "不可",
+	} {
+		if strings.Contains(message, keyword) {
+			return true
+		}
+	}
+	return false
 }
 
 // Describe 返回签到状态的人类可读描述，供启动日志使用。

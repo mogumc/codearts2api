@@ -77,29 +77,23 @@ func (e Endpoints) Balance() string { return e.OpenGWBase + balancePath }
 // GatewayConfig 返回免费模型列表接口地址。
 func (e Endpoints) GatewayConfig() string { return e.OpenGWBase + gatewayConfigPath }
 
-// SignedHostFor 返回请求 rawURL 参与签名时应使用的 host。
+// CodeArtsHost 返回 CodeArts 通道参与签名使用的 host。
 //
-// 判断顺序：先看 URL 属于哪个基址，取该基址配置的 signed host；未配置则取该
-// 基址自身的 host；都不匹配时退回 URL 自带的 host。这样默认行为与"用 URL 的
-// host 签名"完全一致，只有显式配置了 signed host 才会改变。
-func (e Endpoints) SignedHostFor(rawURL string) string {
-	candidates := []struct {
-		base   string
-		signed string
-	}{
-		{e.CodeArtsBase, e.CodeArtsSignedHost},
-		{e.OpenGWBase, e.OpenGWSignedHost},
+// 优先取显式配置的 CodeArtsSignedHost（代理+host 覆盖场景）；未配置时取
+// CodeArtsBase 自身的 host（替换 BaseUrl 场景，签名自动跟随新域名）。
+func (e Endpoints) CodeArtsHost() string {
+	if host := strings.TrimSpace(e.CodeArtsSignedHost); host != "" {
+		return host
 	}
-	for _, candidate := range candidates {
-		if candidate.base == "" || !strings.HasPrefix(rawURL, candidate.base) {
-			continue
-		}
-		if signed := strings.TrimSpace(candidate.signed); signed != "" {
-			return signed
-		}
-		return hostOf(candidate.base)
+	return hostOf(e.CodeArtsBase)
+}
+
+// OpenGWHost 返回免费额度网关参与签名使用的 host，取值规则同 CodeArtsHost。
+func (e Endpoints) OpenGWHost() string {
+	if host := strings.TrimSpace(e.OpenGWSignedHost); host != "" {
+		return host
 	}
-	return hostOf(rawURL)
+	return hostOf(e.OpenGWBase)
 }
 
 // hostOf 提取 URL 的 host 部分，解析失败时返回空串。

@@ -61,7 +61,11 @@ type CacheFile struct {
 
 // Catalog 是并发安全的模型目录。
 type Catalog struct {
-	client    *upstream.Client
+	// codeArtsClient 访问 CodeArts 基址（AgentCenter），gatewayClient 访问
+	// opengw 基址（免费模型列表）。两者签名 host 不同，因此各用一个客户端。
+	codeArtsClient *upstream.Client
+	gatewayClient  *upstream.Client
+
 	cachePath string
 	endpoints config.Endpoints
 
@@ -74,14 +78,17 @@ type Catalog struct {
 }
 
 // New 构造模型目录：优先装载本地缓存，缓存不可用时退回内置兜底列表。
-// endpoints 决定从哪个上游同步模型列表。
-func New(client *upstream.Client, cachePath string, endpoints config.Endpoints) *Catalog {
+//
+// codeArtsClient / gatewayClient 需分别绑定好各自通道的签名 host
+// （见 config.Endpoints 的 CodeArtsHost / OpenGWHost）。
+func New(codeArtsClient, gatewayClient *upstream.Client, cachePath string, endpoints config.Endpoints) *Catalog {
 	c := &Catalog{
-		client:    client,
-		cachePath: cachePath,
-		endpoints: endpoints,
-		details:   map[string]Model{},
-		agentIDs:  map[string]struct{}{},
+		codeArtsClient: codeArtsClient,
+		gatewayClient:  gatewayClient,
+		cachePath:      cachePath,
+		endpoints:      endpoints,
+		details:        map[string]Model{},
+		agentIDs:       map[string]struct{}{},
 	}
 	if !c.LoadCache() {
 		c.applyFallback()
@@ -317,7 +324,7 @@ func (c *Catalog) fetchAgentModels(ctx context.Context) ([]Model, bool) {
 		"accept":     "application/json",
 	}
 
-	resp, err := c.client.Do(ctx, http.MethodGet, c.endpoints.AgentList(), nil, headers)
+	resp, err := c.codeArtsClient.Do(ctx, http.MethodGet, c.endpoints.AgentList(), nil, headers)
 	if err != nil {
 		fmt.Println("自动同步模型失败，将使用缓存或兜底列表:", err)
 		return nil, false
@@ -398,7 +405,7 @@ func pickOrder(values ...*int) int {
 }
 
 func (c *Catalog) fetchAgentDetail(ctx context.Context, detailURL string, headers map[string]string) ([]Model, bool) {
-	resp, err := c.client.Do(ctx, http.MethodGet, detailURL, nil, headers)
+	resp, err := c.codeArtsClient.Do(ctx, http.MethodGet, detailURL, nil, headers)
 	if err != nil {
 		return nil, false
 	}
@@ -451,7 +458,7 @@ func (c *Catalog) fetchAgentDetail(ctx context.Context, detailURL string, header
 
 // fetchBenefitModels 从 opengw 网关拉取免费模型列表。
 func (c *Catalog) fetchBenefitModels(ctx context.Context) []Model {
-	resp, err := c.client.Do(ctx, http.MethodGet, c.endpoints.GatewayConfig(), nil, nil)
+	resp, err := c.gatewayClient.Do(ctx, http.MethodGet, c.endpoints.GatewayConfig(), nil, nil)
 	if err != nil {
 		fmt.Println("免费模型列表同步失败，将使用兜底列表:", err)
 		return nil

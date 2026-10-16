@@ -209,81 +209,76 @@ func TestNormalizeBaseURL(t *testing.T) {
 	}
 }
 
-// TestSignedHostForDefaultsToBaseHost 验证未配置签名 host 时取基址自身 host。
-func TestSignedHostForDefaultsToBaseHost(t *testing.T) {
+// TestCodeArtsHostDefaultsToBaseHost 验证未配置覆盖时，签名 host 取基址自身域名。
+func TestCodeArtsHostDefaultsToBaseHost(t *testing.T) {
 	endpoints := DefaultEndpoints()
 
-	cases := map[string]string{
-		endpoints.Chat():          "snap-access.cn-north-4.myhuaweicloud.com",
-		endpoints.AgentList():     "snap-access.cn-north-4.myhuaweicloud.com",
-		endpoints.BenefitClaim():  "opengw.developer.huaweicloud.com",
-		endpoints.GatewayConfig(): "opengw.developer.huaweicloud.com",
+	if got := endpoints.CodeArtsHost(); got != "snap-access.cn-north-4.myhuaweicloud.com" {
+		t.Errorf("CodeArtsHost() = %q", got)
 	}
-	for rawURL, want := range cases {
-		if got := endpoints.SignedHostFor(rawURL); got != want {
-			t.Errorf("SignedHostFor(%s) = %q, want %q", rawURL, got, want)
-		}
+	if got := endpoints.OpenGWHost(); got != "opengw.developer.huaweicloud.com" {
+		t.Errorf("OpenGWHost() = %q", got)
 	}
 }
 
-// TestSignedHostForOverride 是本次功能的核心：签名 host 可独立配置。
-// 场景：连接中转域名，但签名必须用上游真实域名。
-func TestSignedHostForOverride(t *testing.T) {
+// TestHostFollowsReplacedBaseURL 验证替换 BaseUrl 时签名 host 自动跟随新域名。
+//
+// 这是最常用的场景：直接把 BASE_URL 指向新的上游地址，无需额外配置 host。
+func TestHostFollowsReplacedBaseURL(t *testing.T) {
 	endpoints := Endpoints{
-		CodeArtsBase:       "https://relay.example.com/codearts",
-		OpenGWBase:         "https://relay.example.com/opengw",
+		CodeArtsBase: "https://new-upstream.example.com/codearts",
+		OpenGWBase:   "https://new-gw.example.com/opengw",
+	}
+
+	if got := endpoints.CodeArtsHost(); got != "new-upstream.example.com" {
+		t.Errorf("CodeArtsHost() = %q, want new-upstream.example.com", got)
+	}
+	if got := endpoints.OpenGWHost(); got != "new-gw.example.com" {
+		t.Errorf("OpenGWHost() = %q, want new-gw.example.com", got)
+	}
+}
+
+// TestHostOverrideForProxy 验证「代理 + host 覆盖」场景。
+//
+// 连接走代理域名，但签名必须用上游真实域名。
+func TestHostOverrideForProxy(t *testing.T) {
+	endpoints := Endpoints{
+		CodeArtsBase:       "https://proxy.example.com/codearts",
+		OpenGWBase:         "https://proxy.example.com/opengw",
 		CodeArtsSignedHost: "snap-access.cn-north-4.myhuaweicloud.com",
 		OpenGWSignedHost:   "opengw.developer.huaweicloud.com",
 	}
 
-	// CodeArts 通道的请求应用 CodeArtsSignedHost。
-	if got := endpoints.SignedHostFor(endpoints.Chat()); got != "snap-access.cn-north-4.myhuaweicloud.com" {
-		t.Errorf("Chat 签名 host = %q", got)
+	if got := endpoints.CodeArtsHost(); got != "snap-access.cn-north-4.myhuaweicloud.com" {
+		t.Errorf("CodeArtsHost() = %q", got)
 	}
-	if got := endpoints.SignedHostFor(endpoints.AgentList()); got != "snap-access.cn-north-4.myhuaweicloud.com" {
-		t.Errorf("AgentList 签名 host = %q", got)
-	}
-	// opengw 通道应用 OpenGWSignedHost——两个基址 host 不同，必须分别配置。
-	if got := endpoints.SignedHostFor(endpoints.BenefitClaim()); got != "opengw.developer.huaweicloud.com" {
-		t.Errorf("BenefitClaim 签名 host = %q", got)
-	}
-	if got := endpoints.SignedHostFor(endpoints.GatewayConfig()); got != "opengw.developer.huaweicloud.com" {
-		t.Errorf("GatewayConfig 签名 host = %q", got)
+	if got := endpoints.OpenGWHost(); got != "opengw.developer.huaweicloud.com" {
+		t.Errorf("OpenGWHost() = %q", got)
 	}
 }
 
-// TestSignedHostForPartialOverride 验证只覆盖一个通道时另一个保持默认。
-func TestSignedHostForPartialOverride(t *testing.T) {
+// TestHostOverrideIsIndependentPerChannel 验证两个通道的 host 覆盖互不影响。
+func TestHostOverrideIsIndependentPerChannel(t *testing.T) {
 	endpoints := Endpoints{
-		CodeArtsBase:       "https://relay.example.com/codearts",
-		OpenGWBase:         "https://relay.example.com/opengw",
+		CodeArtsBase:       "https://proxy.example.com/codearts",
+		OpenGWBase:         "https://proxy.example.com/opengw",
 		CodeArtsSignedHost: "snap-access.cn-north-4.myhuaweicloud.com",
-		// OpenGWSignedHost 留空
+		// OpenGWSignedHost 留空：应回退到基址 host
 	}
 
-	if got := endpoints.SignedHostFor(endpoints.Chat()); got != "snap-access.cn-north-4.myhuaweicloud.com" {
+	if got := endpoints.CodeArtsHost(); got != "snap-access.cn-north-4.myhuaweicloud.com" {
 		t.Errorf("已覆盖的通道 = %q", got)
 	}
-	// 未覆盖的通道退回基址 host（即中转域名）。
-	if got := endpoints.SignedHostFor(endpoints.BenefitClaim()); got != "relay.example.com" {
+	if got := endpoints.OpenGWHost(); got != "proxy.example.com" {
 		t.Errorf("未覆盖的通道应取基址 host, 得到 %q", got)
-	}
-}
-
-// TestSignedHostForUnknownURL 验证无法匹配基址时退回 URL 自带 host。
-func TestSignedHostForUnknownURL(t *testing.T) {
-	endpoints := DefaultEndpoints()
-	got := endpoints.SignedHostFor("https://other.example.com/some/path")
-	if got != "other.example.com" {
-		t.Errorf("未知 URL 应取自身 host, 得到 %q", got)
 	}
 }
 
 // TestLoadEndpointsSignedHostFromEnv 验证签名 host 可由环境变量配置。
 func TestLoadEndpointsSignedHostFromEnv(t *testing.T) {
 	prepareEnv(t)
-	t.Setenv("CODEARTS_BASE_URL", "https://relay.example.com/codearts")
-	t.Setenv("CODEARTS_OPENGW_BASE_URL", "https://relay.example.com/opengw")
+	t.Setenv("CODEARTS_BASE_URL", "https://proxy.example.com/codearts")
+	t.Setenv("CODEARTS_OPENGW_BASE_URL", "https://proxy.example.com/opengw")
 	t.Setenv("CODEARTS_BASE_HOST", "snap-access.cn-north-4.myhuaweicloud.com")
 	t.Setenv("CODEARTS_OPENGW_BASE_HOST", "opengw.developer.huaweicloud.com")
 
@@ -291,22 +286,18 @@ func TestLoadEndpointsSignedHostFromEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Endpoints.CodeArtsSignedHost != "snap-access.cn-north-4.myhuaweicloud.com" {
-		t.Errorf("CodeArtsSignedHost = %q", cfg.Endpoints.CodeArtsSignedHost)
+	if got := cfg.Endpoints.CodeArtsHost(); got != "snap-access.cn-north-4.myhuaweicloud.com" {
+		t.Errorf("CodeArtsHost() = %q", got)
 	}
-	if cfg.Endpoints.OpenGWSignedHost != "opengw.developer.huaweicloud.com" {
-		t.Errorf("OpenGWSignedHost = %q", cfg.Endpoints.OpenGWSignedHost)
-	}
-	// 连接地址仍是中转，签名 host 已是上游真实域名。
-	if got := cfg.Endpoints.SignedHostFor(cfg.Endpoints.Chat()); got != "snap-access.cn-north-4.myhuaweicloud.com" {
-		t.Errorf("签名 host = %q", got)
+	if got := cfg.Endpoints.OpenGWHost(); got != "opengw.developer.huaweicloud.com" {
+		t.Errorf("OpenGWHost() = %q", got)
 	}
 }
 
-// TestSignedHostEnvDefaultsToBaseHost 验证不配置时签名 host 跟随基址。
+// TestSignedHostEnvDefaultsToBaseHost 验证不配置 host 时跟随基址。
 func TestSignedHostEnvDefaultsToBaseHost(t *testing.T) {
 	prepareEnv(t)
-	t.Setenv("CODEARTS_BASE_URL", "https://relay.example.com/codearts")
+	t.Setenv("CODEARTS_BASE_URL", "https://new-upstream.example.com/codearts")
 
 	cfg, err := Load()
 	if err != nil {
@@ -315,7 +306,7 @@ func TestSignedHostEnvDefaultsToBaseHost(t *testing.T) {
 	if cfg.Endpoints.CodeArtsSignedHost != "" {
 		t.Errorf("未配置时 CodeArtsSignedHost 应为空, 得到 %q", cfg.Endpoints.CodeArtsSignedHost)
 	}
-	if got := cfg.Endpoints.SignedHostFor(cfg.Endpoints.Chat()); got != "relay.example.com" {
+	if got := cfg.Endpoints.CodeArtsHost(); got != "new-upstream.example.com" {
 		t.Errorf("应回退到基址 host, 得到 %q", got)
 	}
 }
@@ -351,8 +342,8 @@ func TestSignedHostAllowsPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Endpoints.CodeArtsSignedHost != "127.0.0.1:9999" {
-		t.Errorf("CodeArtsSignedHost = %q", cfg.Endpoints.CodeArtsSignedHost)
+	if got := cfg.Endpoints.CodeArtsHost(); got != "127.0.0.1:9999" {
+		t.Errorf("CodeArtsHost() = %q", got)
 	}
 }
 

@@ -37,12 +37,11 @@ type Client struct {
 
 // New 构造免费额度客户端，端点取自 cfg。
 //
-// 签名 host 解析器默认就接上（取自 endpoints），因为通过中转访问时若漏接，
-// 请求会带着错误的 host 签名，上游只会回一个 401 且极难排查。
+// 签名 host 在构造时固定为 OpenGWHost：替换 BaseUrl 时自动跟随新域名，
+// 用代理时由 CODEARTS_OPENGW_BASE_HOST 显式覆盖。
 func New(creds *signer.Credentials, endpoints config.Endpoints) *Client {
 	return &Client{
-		client: upstream.New(creds).
-			WithSignedHostResolver(endpoints.SignedHostFor),
+		client:     upstream.New(creds, endpoints.OpenGWHost()),
 		claimURL:   endpoints.BenefitClaim(),
 		balanceURL: endpoints.Balance(),
 		configURL:  endpoints.GatewayConfig(),

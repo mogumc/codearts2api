@@ -60,16 +60,14 @@ func main() {
 }
 
 func runServer(cfg *config.Config, creds *signer.Credentials) {
-	// 注入签名 host 解析：通过中转访问时签名里的 host 必须写上游真实域名，
-	// 否则上游网关验签失败（401 / APIG.0301）。未配置时返回空串，
-	// 客户端会退回"用请求 URL 的 host 签名"的默认行为。
-	newClient := func() *upstream.Client {
-		return upstream.New(creds).WithSignedHostResolver(cfg.Endpoints.SignedHostFor)
-	}
+	// 每个上游基址配一个绑定好签名 host 的客户端：
+	//   - 替换 BaseUrl 时 host 自动跟随新域名；
+	//   - 用代理时由 CODEARTS_BASE_HOST / CODEARTS_OPENGW_BASE_HOST 显式覆盖。
+	codeArtsClient := upstream.New(creds, cfg.Endpoints.CodeArtsHost())
+	gatewayClient := upstream.New(creds, cfg.Endpoints.OpenGWHost())
 
 	// 启动时先同步一次真实模型列表（失败则回退缓存/兜底），再打印。
-	client := newClient()
-	cat := catalog.New(client, cfg.ModelCachePath, cfg.Endpoints)
+	cat := catalog.New(codeArtsClient, gatewayClient, cfg.ModelCachePath, cfg.Endpoints)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	if !cat.Refresh(ctx) {
@@ -77,7 +75,7 @@ func runServer(cfg *config.Config, creds *signer.Credentials) {
 	}
 	cancel()
 
-	srv := server.New(cfg, cat, client)
+	srv := server.New(cfg, cat, codeArtsClient)
 
 	// 每天首个请求顺带签到一次，避免常驻定时器的开销。
 	var claimer *benefit.AutoClaimer

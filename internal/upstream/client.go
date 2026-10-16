@@ -26,16 +26,16 @@ type Client struct {
 	creds *signer.Credentials
 	http  *http.Client
 
-	// signedHostFor 按请求 URL 返回参与签名的 host；返回空串表示取 URL 自带 host。
+	// signedHost 是参与签名的 host，构造时固定。
 	//
-	// 通过反向代理/中转访问上游时需要它：上游网关按它认定的域名验签，
-	// 而中转域名与上游真实域名不同，会导致验签失败（401 / APIG.0301）。
-	// 做成回调是为了让 upstream 包不依赖 config 包。
-	signedHostFor func(rawURL string) string
+	// 通过反向代理访问上游时填上游真实域名：网关按它收到的 Host 验签，
+	// 而代理域名与上游域名不同，会导致验签失败（401 / APIG.0301）。
+	// 直接替换 BaseUrl 时留空，签名 host 自动取请求 URL 的 host。
+	signedHost string
 }
 
-// New 构造上游客户端。
-func New(creds *signer.Credentials) *Client {
+// New 构造上游客户端。signedHost 为空表示用请求 URL 自身的 host 签名。
+func New(creds *signer.Credentials, signedHost string) *Client {
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
@@ -50,33 +50,15 @@ func New(creds *signer.Credentials) *Client {
 		ResponseHeaderTimeout: responseHeaderTimeout,
 	}
 	return &Client{
-		creds: creds,
-		http:  &http.Client{Transport: transport},
+		creds:      creds,
+		http:       &http.Client{Transport: transport},
+		signedHost: strings.TrimSpace(signedHost),
 	}
-}
-
-// WithSignedHostResolver 注入签名 host 解析函数（链式调用）。
-//
-// resolver 为 nil 时恢复默认行为（用请求 URL 的 host 签名）。
-func (c *Client) WithSignedHostResolver(resolver func(rawURL string) string) *Client {
-	c.signedHostFor = resolver
-	return c
-}
-
-// Credentials 暴露底层签名器。
-func (c *Client) Credentials() *signer.Credentials { return c.creds }
-
-// signedHost 返回本次请求应使用的签名 host（空串表示用 URL 自带 host）。
-func (c *Client) signedHost(rawURL string) string {
-	if c.signedHostFor == nil {
-		return ""
-	}
-	return strings.TrimSpace(c.signedHostFor(rawURL))
 }
 
 // Do 发送带 SDK-HMAC-SHA256 签名的请求，返回原始响应（响应体由调用方关闭）。
 func (c *Client) Do(ctx context.Context, method, rawURL string, body []byte, extraHeaders map[string]string) (*http.Response, error) {
-	headers := c.creds.SignForHost(method, rawURL, c.signedHost(rawURL), body, extraHeaders)
+	headers := c.creds.SignForHost(method, rawURL, c.signedHost, body, extraHeaders)
 
 	var reader io.Reader
 	if len(body) > 0 {

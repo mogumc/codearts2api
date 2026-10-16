@@ -19,7 +19,14 @@ import (
 func newTestCatalog(t *testing.T, models []catalog.Model) *catalog.Catalog {
 	t.Helper()
 	dir := t.TempDir()
-	cat := catalog.New(upstream.New(signer.New("demo-ak", "demo-sk")), dir+"/models-cache.json", config.DefaultEndpoints())
+	endpoints := config.DefaultEndpoints()
+	creds := signer.New("demo-ak", "demo-sk")
+	cat := catalog.New(
+		upstream.New(creds, endpoints.CodeArtsHost()),
+		upstream.New(creds, endpoints.OpenGWHost()),
+		dir+"/models-cache.json",
+		endpoints,
+	)
 	cat.SaveCache(models)
 	if !cat.LoadCache() {
 		t.Fatal("测试模型目录装载失败")
@@ -38,7 +45,8 @@ func benefitModel(id string) catalog.Model {
 func newTestServer(t *testing.T, models []catalog.Model) *Server {
 	t.Helper()
 	cfg := &config.Config{AK: "demo-ak", SK: "demo-sk", ListenHost: "127.0.0.1", ListenPort: 8787}
-	return New(cfg, newTestCatalog(t, models), upstream.New(signer.New("demo-ak", "demo-sk")))
+	client := upstream.New(signer.New("demo-ak", "demo-sk"), config.DefaultEndpoints().CodeArtsHost())
+	return New(cfg, newTestCatalog(t, models), client)
 }
 
 // newTestServerFor 按指定通道构造只含单个模型的服务。

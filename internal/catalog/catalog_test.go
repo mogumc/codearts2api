@@ -14,8 +14,13 @@ import (
 
 func newTestCatalog(t *testing.T) *Catalog {
 	t.Helper()
-	client := upstream.New(signer.New("demo-ak", "demo-sk"))
-	return New(client, filepath.Join(t.TempDir(), "models-cache.json"), config.DefaultEndpoints())
+	creds := signer.New("demo-ak", "demo-sk")
+	return New(
+		upstream.New(creds, config.DefaultEndpoints().CodeArtsHost()),
+		upstream.New(creds, config.DefaultEndpoints().OpenGWHost()),
+		filepath.Join(t.TempDir(), "models-cache.json"),
+		config.DefaultEndpoints(),
+	)
 }
 
 func TestNewFallsBackWhenNoCache(t *testing.T) {
@@ -47,7 +52,7 @@ func TestSaveAndLoadCache(t *testing.T) {
 	cat.SaveCache(models)
 
 	// 新目录实例应能从缓存恢复。
-	reloaded := New(cat.client, cat.cachePath, config.DefaultEndpoints())
+	reloaded := newTestCatalogAt(t, cat.cachePath)
 	ids := reloaded.IDs()
 	if len(ids) != 2 || ids[0] != "openpangu-2.0-pro" || ids[1] != "glm-5.3-flash" {
 		t.Fatalf("缓存恢复失败: %v", ids)
@@ -74,7 +79,7 @@ func TestLoadCacheToleratesLegacyChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cat := New(upstream.New(signer.New("a", "b")), path, config.DefaultEndpoints())
+	cat := newTestCatalogAt(t, path)
 	if !cat.Contains("GLM-5.2") {
 		t.Fatal("旧缓存未装载")
 	}
@@ -90,7 +95,7 @@ func TestLoadCacheRejectsBrokenFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cat := New(upstream.New(signer.New("a", "b")), path, config.DefaultEndpoints())
+	cat := newTestCatalogAt(t, path)
 	if !cat.LoadCache() {
 		// 预期失败，此时应仍保有兜底列表。
 		if len(cat.IDs()) == 0 {
@@ -162,13 +167,13 @@ func TestModelsReturnsDetails(t *testing.T) {
 func TestRefreshIfNeededSkipsNetworkWhenCacheFresh(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "models-cache.json")
-	seed := New(upstream.New(signer.New("a", "b")), path, config.DefaultEndpoints())
+	seed := newTestCatalogAt(t, path)
 	seed.SaveCache([]Model{{ID: "cached-model", Channel: ChannelAgent}})
 
 	// 新建实例从新鲜缓存装载；此时不应再发起任何上游请求。
 	// 用一个指向不可达地址的客户端来证明这一点：一旦触网就会失败并丢失模型。
-	unreachable := upstream.New(signer.New("a", "b"))
-	cat := New(unreachable, path, config.DefaultEndpoints())
+	unreachable := upstream.New(signer.New("a", "b"), "unreachable.invalid")
+	cat := New(unreachable, unreachable, path, config.DefaultEndpoints())
 	cat.RefreshIfNeeded(context.Background())
 
 	if !cat.Contains("cached-model") {
@@ -180,3 +185,16 @@ func TestRefreshIfNeededSkipsNetworkWhenCacheFresh(t *testing.T) {
 }
 
 func intPtr(v int64) *int64 { return &v }
+
+// newTestCatalogAt 构造指向指定缓存路径的目录（不触网，仅用于缓存相关用例）。
+func newTestCatalogAt(t *testing.T, path string) *Catalog {
+	t.Helper()
+	creds := signer.New("a", "b")
+	endpoints := config.DefaultEndpoints()
+	return New(
+		upstream.New(creds, endpoints.CodeArtsHost()),
+		upstream.New(creds, endpoints.OpenGWHost()),
+		path,
+		endpoints,
+	)
+}
