@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+# 同一分支的重复推送只保留最新一次运行。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.24"
+
+jobs:
+  # 代码规范与静态检查，跑得最快，放在最前面快速反馈。
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未格式化，请执行 gofmt -w："
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go mod tidy 检查
+        run: |
+          go mod tidy
+          # 用 git status 而非 git diff：本项目零依赖，go.sum 可能不存在，
+          # 而 `git diff --quiet go.mod go.sum` 在路径不存在时返回 128（错误码），
+          # 经 `!` 反转后会误报失败。git status 同时覆盖「修改」与「新增」两种情况。
+          changed=$(git status --porcelain -- go.mod go.sum)
+          if [ -n "$changed" ]; then
+            echo "go.mod / go.sum 与源码不一致，请在本地执行 go mod tidy 后提交："
+            echo "$changed"
+            git diff -- go.mod go.sum
+            exit 1
+          fi
+          echo "go.mod / go.sum 一致"
+
+  # 单元测试，开启竞态检测。
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: 运行测试（含竞态检测）
+        run: go test -race -count=1 ./...
+
+      - name: 生成覆盖率
+        run: go test -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: 覆盖率摘要
+        run: go tool cover -func=coverage.out | tail -1
+
+      - name: 上传覆盖率报告
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: ignore
+
+  # 交叉编译，确认各目标平台都能构建成功。
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: 交叉编译
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          suffix=""
+          if [ "$GOOS" = "windows" ]; then suffix=".exe"; fi
+          go build -trimpath -ldflags "-s -w" -o "codearts2api${suffix}" .
+          ls -lh "codearts2api${suffix}"
+
+  # 验证 Dockerfile 可构建（不推送镜像）。
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 构建镜像（不推送）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: codearts2api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 冒烟测试（版本号输出）
+        run: |
+          docker run --rm codearts2api:ci -version

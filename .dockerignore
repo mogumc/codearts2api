@@ -1,0 +1,32 @@
+# 版本控制与本地数据
+.git
+.gitignore
+.github
+.workbuddy
+
+# 本地配置与运行产物（绝不进镜像，避免 AK/SK 泄露）
+.env
+models-cache.json
+benefit-state.json
+
+# 文档与许可
+README.md
+LICENSE
+*.md
+
+# 编辑器
+.vscode
+.idea
+
+# 编译产物
+codearts2api
+codearts2api.exe
+*.exe
+*.test
+*.out
+coverage.*
+
+# Docker 自身
+Dockerfile
+.dockerignore
+docker-compose.yml

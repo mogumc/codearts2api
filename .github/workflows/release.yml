@@ -1,0 +1,208 @@
+name: Release
+
+# 推送 v* 形式的 tag 时触发（如 v1.0.0、v1.2.3-beta.1）。
+on:
+  push:
+    tags: ["v*"]
+  # 允许手动触发，用于补发或演练（不会创建 Release，只构建产物）。
+  workflow_dispatch:
+
+permissions:
+  contents: write # 创建 Release 与上传产物
+  packages: write # 推送镜像到 GHCR
+
+env:
+  GO_VERSION: "1.24"
+  REGISTRY: ghcr.io
+
+jobs:
+  # 发布前先跑一遍测试，避免把坏版本发出去。
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未格式化："
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: 测试（含竞态检测）
+        run: go test -race -count=1 ./...
+
+  # 交叉编译并打包，产出 GitHub Release。
+  release:
+    name: Build & Release
+    needs: verify
+    runs-on: ubuntu-latest
+    # 仅 tag 推送时创建 Release；手动触发只构建产物供下载。
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: 准备版本信息
+        id: meta
+        run: |
+          echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: 编译
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          suffix=""
+          if [ "$GOOS" = "windows" ]; then suffix=".exe"; fi
+          name="codearts2api_${GOOS}_${GOARCH}"
+          go build -trimpath \
+            -ldflags "-s -w \
+              -X codearts2api/internal/version.Version=${{ steps.meta.outputs.version }} \
+              -X codearts2api/internal/version.Commit=${{ steps.meta.outputs.commit }} \
+              -X codearts2api/internal/version.Date=${{ steps.meta.outputs.date }}" \
+            -o "dist/${name}${suffix}" .
+          echo "built dist/${name}${suffix}"
+
+      - name: 打包
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          name="codearts2api_${GOOS}_${GOARCH}"
+          suffix=""
+          if [ "$GOOS" = "windows" ]; then suffix=".exe"; fi
+          # 把配置样例一并放进包里，方便使用者直接改名使用。
+          cp .env.example dist/.env.example
+          cd dist
+          if [ "$GOOS" = "windows" ]; then
+            # Windows 用户更习惯 zip。
+            zip -j "${name}.zip" "${name}${suffix}" .env.example
+          else
+            tar -czf "${name}.tar.gz" "${name}${suffix}" .env.example
+          fi
+          ls -lh
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: codearts2api_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  # 汇总所有平台的产物并创建 Release。
+  publish:
+    name: Publish Release
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 下载全部产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 生成校验和
+        run: |
+          cd artifacts
+          # 用 find 避免某个 glob 无匹配时整体失败。
+          find . -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\n' \
+            | sort | xargs -r sha256sum > checksums.txt
+          cat checksums.txt
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/checksums.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # 构建并推送多架构镜像到 GHCR。
+  docker:
+    name: Publish Docker image
+    needs: verify
+    runs-on: ubuntu-latest
+    # 仅 tag 推送时发布镜像：手动触发没有 tag，semver 标签无法生成。
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备镜像元数据
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送（linux/amd64 + linux/arm64）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

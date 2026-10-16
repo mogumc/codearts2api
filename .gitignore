@@ -29,5 +29,14 @@ go.work.sum
 .env
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
+.workbuddy/
+
+# data
+models-cache.json
+benefit-state.json
+
+# build output
+dist/
+coverage.out
