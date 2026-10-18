@@ -177,7 +177,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 通道判断：AgentCenter 老套餐模型用基础签名；其余（免费 benefit 模型）
 	// 必须带 maas_type/model-id/model-name 三个签名头，否则上游报未注册。
 	benefit := !s.catalog.IsAgentChannel(model)
+
+	// 客户端是否要流式，在整形之前取——整形对带工具的请求会强制上游走流式，
+	// 不能让它改变对客户端的响应方式。
 	wantStream, _ := req["stream"].(bool)
+
+	// 整形：上游的工具调用只在「流式 + tool_stream」下产出结构化 tool_calls，
+	// 且 tool_choice 只接受字符串形态。非流式客户端由下面的聚合路径兜住。
+	if err := openai.ShapeRequest(req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "")
+		return
+	}
 
 	// 重新序列化 body，确保与签名时使用的字节完全一致。
 	body, err := marshalCompact(req)

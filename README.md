@@ -220,7 +220,12 @@ CODEARTS_OPENGW_BASE_HOST=opengw.developer.huaweicloud.com
 ```cmd
 go run ./cmd/testclient
 go run ./cmd/testclient glm-5.3-flash
+go run ./cmd/testclient tools
+go run ./cmd/testclient tools glm-5.3-flash
 ```
+
+`tools` 模式会分别用非流式和流式各发一轮带 `tools` 的请求（`tool_choice` 用对象形态），
+并检查响应里有没有 `tool_calls`——排查工具调用问题时先跑这个。
 
 单元测试：
 
@@ -266,6 +271,7 @@ codearts2api/
 │   ├── upstream/client.go         # 带签名的 HTTP 客户端
 │   ├── catalog/catalog.go         # 模型目录：双通道同步 + 本地缓存
 │   ├── openai/protocol.go         # OpenAI 协议：SSE 聚合、finish_reason 归一化
+│   ├── openai/request.go          # 请求整形：工具调用所需的 tool_stream / tool_choice / 工具历史清洗
 │   ├── server/server.go           # HTTP 路由与流式转发
 │   ├── server/http.go             # SSE 读写与 JSON 响应辅助
 │   ├── benefit/benefit.go         # 免费额度签到与查询
@@ -277,6 +283,7 @@ codearts2api/
 ## 实现要点
 
 - **双通道签名**：`agent` 通道（AgentCenter 老套餐模型）走基础签名；`benefit` 通道（免费额度模型）必须额外携带并签名 `maas_type` / `model-id` / `model-name` 三个头，否则上游报 `model is not registered`。不在已知列表中的模型一律按 `benefit` 处理，上游新增免费模型无需改代码。
+- **工具调用（function call）**：上游对 `tools` 有三处与标准 OpenAI 不同的要求，代理在转发前统一整形，否则表现为「模型只把调用写成一段文字」：① 必须带 `tool_stream=true`，否则不产出结构化 `tool_calls`；② `tool_stream` 只在流式下生效，因此带工具的请求强制走上游流式，非流式客户端由代理聚合成单个 JSON；③ `tool_choice` 只接受字符串，对象形态会被上游以 `InferHub.001001005.400` 拒绝——指定具体函数时改为「只下发该函数 + `required`」。残破的工具历史（孤儿 `tool_calls`、没有对应调用的工具结果）会被剥掉，否则上游整轮 400。
 - **模型列表**：启动时从 AgentCenter 与 opengw 网关同步，写入 `models-cache.json`；300 秒短缓存避免客户端轮询造成请求风暴；同步失败自动回退缓存，再回退内置兜底列表。
 - **自动签到**：不跑常驻定时器。请求路径上只做一次内存日期比对（不触网、不读盘），需要签到时交给后台 goroutine，签到状态落盘保证跨重启幂等；失败按 10 分钟退避。
 - **流式转发**：`benefit` 通道会补齐缺失的 `finish_reason` 与 `[DONE]`，并把 `content: null` 规范化为空字符串（部分 Agent Runtime 只接受字符串 content）；`agent` 通道保持即时转发，不改变既有客户端状态机。

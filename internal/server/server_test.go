@@ -449,6 +449,54 @@ func TestChatDefaultsModelWhenMissing(t *testing.T) {
 	}
 }
 
+// TestChatToolsReachUpstreamAsStream 验证带工具的请求被整形为上游认的形态，
+// 非流式客户端拿到的仍是聚合后的单个 JSON。
+func TestChatToolsReachUpstreamAsStream(t *testing.T) {
+	var seenBody map[string]any
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &seenBody)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w,
+			"data: {\"id\":\"c1\",\"model\":\"openpangu-2.0-pro\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,"+
+				"\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}}]}}]}\n\n"+
+				"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"+
+				"data: [DONE]\n\n")
+	}))
+	defer fake.Close()
+
+	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv.chatURL = fake.URL
+
+	body := `{"model":"openpangu-2.0-pro","stream":false,"messages":[{"role":"user","content":"看下目录"}],` +
+		`"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}}],` +
+		`"tool_choice":{"type":"function","function":{"name":"bash"}}}`
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+
+	if seenBody["stream"] != true {
+		t.Errorf("带工具时上游必须走流式: %v", seenBody["stream"])
+	}
+	if seenBody["tool_stream"] != true {
+		t.Errorf("上游缺少 tool_stream=true: %v", seenBody["tool_stream"])
+	}
+	if seenBody["tool_choice"] != "required" {
+		t.Errorf("对象形态 tool_choice 应被改为字符串 required, 得到 %v", seenBody["tool_choice"])
+	}
+
+	out := rec.Body.String()
+	if strings.Contains(out, "data:") {
+		t.Errorf("非流式客户端不应收到 SSE 帧: %s", out)
+	}
+	if !strings.Contains(out, `"tool_calls"`) {
+		t.Errorf("聚合结果应保留 tool_calls: %s", out)
+	}
+	if !strings.Contains(out, `"finish_reason":"tool_calls"`) {
+		t.Errorf("finish_reason 应为 tool_calls: %s", out)
+	}
+}
+
 // runChatTest 用假上游跑一次聊天请求，返回代理响应体。
 func runChatTest(t *testing.T, model string, stream bool, upstreamBody, contentType string) string {
 	t.Helper()
