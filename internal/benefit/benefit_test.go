@@ -304,37 +304,9 @@ func TestDoHandlesMalformedJSON(t *testing.T) {
 }
 
 // runWithClient 用指定客户端执行 action，返回退出码。
-// 与 Run 逻辑一致，但跳过 config 加载，便于注入假上游。
+// 走真实的 runActions，只是跳过 config 加载与活动积分客户端，便于注入假上游。
 func runWithClient(client *Client, action string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
-	switch action {
-	case "status":
-		if err := showStatus(ctx, client); err != nil {
-			return 1
-		}
-	case "claim":
-		if err := doClaim(ctx, client); err != nil {
-			return 1
-		}
-		if err := showBalance(ctx, client); err != nil {
-			return 1
-		}
-	case "models":
-		if err := showModels(ctx, client); err != nil {
-			return 1
-		}
-	default:
-		if err := showStatus(ctx, client); err != nil {
-			return 1
-		}
-		if err := doClaim(ctx, client); err != nil {
-			return 1
-		}
-		if err := showBalance(ctx, client); err != nil {
-			return 1
-		}
-	}
-	return 0
+	return runActions(ctx, client, nil, action)
 }

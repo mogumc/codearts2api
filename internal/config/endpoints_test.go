@@ -58,6 +58,11 @@ func TestEndpointPaths(t *testing.T) {
 		{"BenefitClaim", endpoints.BenefitClaim(), DefaultOpenGWBaseURL + "/api/v1/benefit/claim"},
 		{"Balance", endpoints.Balance(), DefaultOpenGWBaseURL + "/api/v1/user/tokens/balance"},
 		{"GatewayConfig", endpoints.GatewayConfig(), DefaultOpenGWBaseURL + "/api/v1/gateway/config"},
+		// 活动积分走 CodeArts 基址根路径（不带 snap-manager），且必须带 channel。
+		{"CreditDelivery", endpoints.CreditDelivery(),
+			DefaultCodeArtsBaseURL + "/v1/ops/delivery?channel=IDE"},
+		{"CreditClaim", endpoints.CreditClaim(), DefaultCodeArtsBaseURL + "/v1/ops/claim"},
+		{"CreditConfirm", endpoints.CreditConfirm(), DefaultCodeArtsBaseURL + "/v1/ops/confirm"},
 	}
 	for _, tc := range cases {
 		if tc.got != tc.want {

@@ -3,7 +3,7 @@
 // 用法:
 //
 //	codearts2api            # 启动代理（默认 127.0.0.1:8787）
-//	codearts2api benefit    # 免费额度签到 + 查询余额（详见 benefit 子命令）
+//	codearts2api benefit    # 活动积分签到 + 免费额度签到 + 查询余额（详见 benefit 子命令）
 //	codearts2api -version   # 打印版本信息
 //
 // 配置来自 .env 或环境变量：CODEARTS_AK / CODEARTS_SK。
@@ -87,6 +87,8 @@ func runServer(cfg *config.Config, creds *signer.Credentials) {
 				fmt.Printf("[自动签到] "+format+"\n", args...)
 			},
 		)
+		// 活动积分是当前有效的签到入口；免费额度作为附加动作 best-effort。
+		claimer.SetCredit(benefit.NewCredit(creds, cfg.Endpoints))
 		srv.SetAutoClaim(claimer.MaybeClaim)
 	}
 

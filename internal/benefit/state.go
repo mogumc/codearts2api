@@ -14,13 +14,15 @@ const dateLayout = "2006-01-02"
 // 字段语义：
 //   - LastSuccessDate：最后一次签到成功的本地日期，决定今天是否还需要签到；
 //   - LastAttemptAt：最后一次尝试时间（含失败），用于失败后退避，避免每个请求都打上游；
-//   - LastClaimTime：上游返回的 create_time（毫秒），便于排查；
-//   - LastError：最后一次失败原因，成功后清空。
+//   - LastClaimTime：最近一次签到完成时间（毫秒）；上游给了 create_time 就用它；
+//   - LastError：最后一次失败原因，成功后清空；
+//   - LastWarning：签到已成功、但附加动作（免费额度）失败时的提示，成功后清空。
 type State struct {
 	LastSuccessDate string `json:"last_success_date,omitempty"`
 	LastAttemptAt   int64  `json:"last_attempt_at,omitempty"`
 	LastClaimTime   int64  `json:"last_claim_time,omitempty"`
 	LastError       string `json:"last_error,omitempty"`
+	LastWarning     string `json:"last_warning,omitempty"`
 }
 
 // LoadState 从磁盘读取签到状态；文件不存在或损坏时返回零值。

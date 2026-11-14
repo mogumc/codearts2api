@@ -26,7 +26,16 @@ const (
 	benefitClaimPath  = "/api/v1/benefit/claim"
 	balancePath       = "/api/v1/user/tokens/balance"
 	gatewayConfigPath = "/api/v1/gateway/config"
+
+	// 活动积分（每日签到 / 新手礼包）。注意这几个端点在 CodeArts 基址的
+	// 根路径上，不带 /snap-manager 前缀。
+	creditDeliveryPath = "/v1/ops/delivery"
+	creditClaimPath    = "/v1/ops/claim"
+	creditConfirmPath  = "/v1/ops/confirm"
 )
+
+// CreditChannel 是活动接口要求的渠道标识，查询与领取必须用同一个值。
+const CreditChannel = "IDE"
 
 // Endpoints 汇总上游各接口的完整 URL。
 //
@@ -76,6 +85,17 @@ func (e Endpoints) Balance() string { return e.OpenGWBase + balancePath }
 
 // GatewayConfig 返回免费模型列表接口地址。
 func (e Endpoints) GatewayConfig() string { return e.OpenGWBase + gatewayConfigPath }
+
+// CreditDelivery 返回活动投放列表地址（每日签到 / 新手礼包等）。
+func (e Endpoints) CreditDelivery() string {
+	return e.CodeArtsBase + creditDeliveryPath + "?channel=" + CreditChannel
+}
+
+// CreditClaim 返回活动领取接口地址。
+func (e Endpoints) CreditClaim() string { return e.CodeArtsBase + creditClaimPath }
+
+// CreditConfirm 返回活动确认接口地址。
+func (e Endpoints) CreditConfirm() string { return e.CodeArtsBase + creditConfirmPath }
 
 // CodeArtsHost 返回 CodeArts 通道参与签名使用的 host。
 //
