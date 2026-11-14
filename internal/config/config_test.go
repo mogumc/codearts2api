@@ -11,7 +11,7 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"CODEARTS_AK", "CODEARTS_SK", "CODEARTS_PROXY_HOST",
-		"CODEARTS_PROXY_PORT", "CODEARTS_MODEL_CACHE",
+		"CODEARTS_PROXY_PORT", "CODEARTS_MODEL_CACHE", "CODEARTS_TRIM_RETRY",
 	} {
 		old, existed := os.LookupEnv(key)
 		_ = os.Unsetenv(key)
@@ -126,5 +126,43 @@ func TestApplyDotEnvSkipsCommentsAndBlanks(t *testing.T) {
 
 	if got := os.Getenv("CODEARTS_TEST_KEY"); got != "value" {
 		t.Errorf("CODEARTS_TEST_KEY = %q", got)
+	}
+}
+
+// TestLoadTrimRetryDefaultsToOff 验证降级重试默认关闭。
+func TestLoadTrimRetryDefaultsToOff(t *testing.T) {
+	clearEnv(t)
+	t.Chdir(t.TempDir())
+	t.Setenv("CODEARTS_AK", "a")
+	t.Setenv("CODEARTS_SK", "b")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TrimRetry != 0 {
+		t.Errorf("默认应关闭降级重试, 得到 %d", cfg.TrimRetry)
+	}
+}
+
+// TestLoadTrimRetryFromEnv 验证 CODEARTS_TRIM_RETRY 生效，并拒绝非法值。
+func TestLoadTrimRetryFromEnv(t *testing.T) {
+	clearEnv(t)
+	t.Chdir(t.TempDir())
+	t.Setenv("CODEARTS_AK", "a")
+	t.Setenv("CODEARTS_SK", "b")
+	t.Setenv("CODEARTS_TRIM_RETRY", "6")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TrimRetry != 6 {
+		t.Errorf("TrimRetry = %d, want 6", cfg.TrimRetry)
+	}
+
+	t.Setenv("CODEARTS_TRIM_RETRY", "-1")
+	if _, err := Load(); err == nil {
+		t.Fatal("负数应返回错误")
 	}
 }

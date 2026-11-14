@@ -4,6 +4,7 @@ package upstream
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -13,6 +14,28 @@ import (
 	"codearts2api/internal/signer"
 	"codearts2api/internal/version"
 )
+
+// ChatHeaders 返回聊天补全的固定请求头。
+//
+// 与官方 CodeArts Agent（AgentKernel）保持一致：除签名本身外，还要带上
+// app-id / is_confidential / X-Language / Accept。这些头让上游把请求识别为
+// IDE 会话流量，而不是一次匿名的通用调用——后者更容易被场景风控拦下
+// （表现为 403 + InferHub.ModelArts.81011）。
+//
+// traceID 为空时按纳秒时间戳生成；它只是链路追踪标识，不参与业务判断。
+func ChatHeaders(traceID string) map[string]string {
+	if strings.TrimSpace(traceID) == "" {
+		traceID = fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	return map[string]string{
+		"Content-Type":    "application/json",
+		"Accept":          "text/event-stream",
+		"X-Language":      "zh-cn",
+		"app-id":          "CodeAgent3.0",
+		"is_confidential": "false",
+		"x-snap-traceid":  traceID,
+	}
+}
 
 // responseHeaderTimeout 是等待上游响应头的超时时间。
 //
@@ -58,7 +81,16 @@ func New(creds *signer.Credentials, signedHost string) *Client {
 
 // Do 发送带 SDK-HMAC-SHA256 签名的请求，返回原始响应（响应体由调用方关闭）。
 func (c *Client) Do(ctx context.Context, method, rawURL string, body []byte, extraHeaders map[string]string) (*http.Response, error) {
-	headers := c.creds.SignForHost(method, rawURL, c.signedHost, body, extraHeaders)
+	return c.DoWithUnsigned(ctx, method, rawURL, body, extraHeaders, nil)
+}
+
+// DoWithUnsigned 与 Do 相同，但在签名完成后再追加 unsignedHeaders。
+//
+// 上游只校验 Authorization 里的 SignedHeaders，未参与签名的头可以照常发送。
+// Chat-Id / Session-Id 属于这一类：它们随会话变化，写进签名没有收益，
+// 反而让签名头集合频繁变动。
+func (c *Client) DoWithUnsigned(ctx context.Context, method, rawURL string, body []byte, signedHeaders, unsignedHeaders map[string]string) (*http.Response, error) {
+	headers := c.creds.SignForHost(method, rawURL, c.signedHost, body, signedHeaders)
 
 	var reader io.Reader
 	if len(body) > 0 {
@@ -80,6 +112,9 @@ func (c *Client) Do(ctx context.Context, method, rawURL string, body []byte, ext
 			req.Host = value
 			continue
 		}
+		req.Header.Set(name, value)
+	}
+	for name, value := range unsignedHeaders {
 		req.Header.Set(name, value)
 	}
 	// Content-Length 需显式给出，否则部分网关按 chunked 处理会导致签名不一致。

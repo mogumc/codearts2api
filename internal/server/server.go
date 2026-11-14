@@ -20,6 +20,9 @@ import (
 // 流式请求不设整体超时，仅靠客户端断开与响应头超时保护。
 const nonStreamTimeout = 600 * time.Second
 
+// upstreamErrorLimit 限制读取上游错误响应的字节数（只为拿到错误文案）。
+const upstreamErrorLimit = 8 << 10
+
 // Server 承载代理的全部路由与依赖。
 type Server struct {
 	cfg     *config.Config
@@ -32,6 +35,12 @@ type Server struct {
 	// auth 是下游鉴权配置；Keys 为空时不鉴权。
 	auth AuthConfig
 
+	// trimRetry 是内容审核命中后的降级重试条数（0 表示不重试）。
+	//
+	// 命中 81011 时丢掉早期历史、只发开头 system + 尾部 N 条再试一次。
+	// 默认关闭：这会牺牲上下文完整性，属于「总比整轮失败好」的兜底。
+	trimRetry int
+
 	// autoClaim 在每天首个请求时顺带签到一次；为 nil 时不做任何事。
 	// 调用点只做内存判断，真正的签到在后台 goroutine 执行。
 	autoClaim func()
@@ -42,11 +51,12 @@ type Server struct {
 // client 需已绑定 CodeArts 通道的签名 host（见 config.Endpoints.CodeArtsHost）。
 func New(cfg *config.Config, cat *catalog.Catalog, client *upstream.Client) *Server {
 	return &Server{
-		cfg:     cfg,
-		catalog: cat,
-		client:  client,
-		chatURL: cfg.Endpoints.Chat(),
-		auth:    AuthConfig{Keys: cfg.ProxyKeys},
+		cfg:       cfg,
+		catalog:   cat,
+		client:    client,
+		chatURL:   cfg.Endpoints.Chat(),
+		auth:      AuthConfig{Keys: cfg.ProxyKeys},
+		trimRetry: cfg.TrimRetry,
 	}
 }
 
@@ -182,12 +192,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 不能让它改变对客户端的响应方式。
 	wantStream, _ := req["stream"].(bool)
 
+	// 会话标识：调用方显式给出的优先，否则按首条 user 消息派生。
+	// conversation_id 不是 OpenAI 字段，读走后必须删掉，否则会被带给上游。
+	chatID := openai.ChatID(explicitChatID(r, req), asSlice(req["messages"]))
+	delete(req, "conversation_id")
+
 	// 整形：上游的工具调用只在「流式 + tool_stream」下产出结构化 tool_calls，
 	// 且 tool_choice 只接受字符串形态。非流式客户端由下面的聚合路径兜住。
 	if err := openai.ShapeRequest(req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "")
 		return
 	}
+
+	// chat_id / prompt_cache_key 让上游把同一会话的请求串起来：复用 prompt
+	// cache，并当作 IDE 会话续接，而不是每次都是全新的匿名调用。
+	req["chat_id"] = chatID
+	req["prompt_cache_key"] = chatID
 
 	// 重新序列化 body，确保与签名时使用的字节完全一致。
 	body, err := marshalCompact(req)
@@ -196,12 +216,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// benefit 通道的三个头必须参与签名，因此交由上游客户端统一签名。
-	extra := map[string]string{}
-	if benefit && model != "" {
-		extra["maas_type"] = "benefit"
-		extra["model-id"] = model
-		extra["model-name"] = model
+	// 固定头（app-id / X-Language / Accept 等）与 benefit 的三个头都必须参与
+	// 签名，因此统一交给上游客户端处理。
+	headers := upstream.ChatHeaders("")
+	if benefit {
+		headers["maas_type"] = "benefit"
+		headers["model-id"] = model
+		headers["model-name"] = model
+	}
+	// Chat-Id / Session-Id 在签名之后追加，不进入 SignedHeaders。
+	unsigned := map[string]string{
+		"Chat-Id":    chatID,
+		"Session-Id": openai.SessionID(chatID),
 	}
 
 	ctx := r.Context()
@@ -211,17 +237,44 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 	}
 
-	resp, err := s.client.Do(ctx, http.MethodPost, s.chatURL, body, extra)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "upstream error: "+err.Error(), "", "")
+	resp, fail := s.sendChat(ctx, body, headers, unsigned)
+	// 内容审核命中时按配置做一次降级重试：丢掉早期历史再试。
+	if fail != nil && fail.Code == openai.ContentFilter && s.trimRetry > 0 {
+		if trimMessages(req, s.trimRetry) {
+			if retryBody, encErr := marshalCompact(req); encErr == nil {
+				if retryResp, retryFail := s.sendChat(ctx, retryBody, headers, unsigned); retryFail == nil {
+					resp, fail = retryResp, nil
+				}
+			}
+		}
+	}
+	if fail != nil {
+		writeFailure(w, fail)
 		return
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
-		writeError(w, http.StatusBadGateway,
-			fmt.Sprintf("upstream %d: %s", resp.StatusCode, string(detail)), "", "")
+	sse := strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream")
+
+	// 上游偶尔在请求流式时返回普通 JSON（排队、重试或特定模型场景），
+	// 也可能在非流式请求上返回 SSE。两种形态都在这里统一处理，保证错误
+	// 能在写出 200 之前被识别出来。
+	if !sse {
+		payload, err := io.ReadAll(resp.Body)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "upstream read error: "+err.Error(), "", "")
+			return
+		}
+		result := openai.ParseUpstream(payload)
+		if failure := embeddedFailure(result); failure != nil {
+			writeFailure(w, failure)
+			return
+		}
+		if wantStream {
+			writeSingleSSEFrame(w, result)
+			return
+		}
+		writeRawJSON(w, http.StatusOK, result)
 		return
 	}
 
@@ -230,25 +283,110 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 非流式：无论上游返回 JSON 还是 SSE，都统一聚合成单个 JSON。
-	// CodeArts 在排队、重试或特定模型场景下可能即使请求 stream=false 仍返回
-	// text/event-stream，直接转发会导致客户端把 data: 当作 JSON 解析。
+	// 非流式：上游返回 SSE，统一聚合成单个 JSON。
 	payload, err := io.ReadAll(resp.Body)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "upstream read error: "+err.Error(), "", "")
 		return
 	}
 	result := openai.ParseUpstream(payload)
-	if obj, ok := result.(map[string]any); ok {
-		if _, hasError := obj["error"]; hasError {
-			writeRawJSON(w, http.StatusBadGateway, result)
-			return
-		}
+	if failure := embeddedFailure(result); failure != nil {
+		writeFailure(w, failure)
+		return
 	}
 	writeRawJSON(w, http.StatusOK, result)
 }
 
-// streamResponse 严格按 OpenAI SSE 转发上游流。
+// sendChat 向上游发起一次聊天请求，并对流式响应做首帧探测。
+//
+// 返回的 fail 非 nil 时响应体已关闭，调用方只需把错误写给下游。
+func (s *Server) sendChat(ctx context.Context, body []byte, headers, unsigned map[string]string) (*http.Response, *upstreamFailure) {
+	resp, err := s.client.DoWithUnsigned(ctx, http.MethodPost, s.chatURL, body, headers, unsigned)
+	if err != nil {
+		return nil, &upstreamFailure{
+			Status:  http.StatusBadGateway,
+			Type:    "upstream_error",
+			Message: "upstream error: " + err.Error(),
+		}
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, upstreamErrorLimit))
+		_ = resp.Body.Close()
+		code, message := openai.ExtractUpstreamError(detail)
+		return nil, classifyFailure(resp.StatusCode, code, message, string(detail))
+	}
+
+	// 内容审核等业务错误常以 HTTP 200 + 首帧内嵌 error_code 返回，
+	// 必须在写出响应头之前识别，否则客户端只会看到一段空回复。
+	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+		reader, fail := preflightStream(resp.Body)
+		if fail != nil {
+			return nil, fail
+		}
+		resp.Body = reader
+	}
+	return resp, nil
+}
+
+// embeddedFailure 把聚合结果里的 error 对象翻译成下游错误；没有错误时返回 nil。
+func embeddedFailure(result any) *upstreamFailure {
+	obj, ok := result.(map[string]any)
+	if !ok {
+		return nil
+	}
+	code, message, found := openai.ExtractEmbeddedError(obj)
+	if !found {
+		return nil
+	}
+	return classifyFailure(http.StatusOK, code, message, "")
+}
+
+// explicitChatID 读取调用方显式给出的会话标识。
+func explicitChatID(r *http.Request, req map[string]any) string {
+	if value := strings.TrimSpace(r.Header.Get("X-Codearts-Chat-Id")); value != "" {
+		return value
+	}
+	value, _ := req["conversation_id"].(string)
+	return value
+}
+
+// trimMessages 把消息裁成「开头的 system + 尾部 keep 条」，用于审核命中的降级重试。
+//
+// 命中的诱因常常埋在被反复重放的历史里：一条旧消息会被每一轮重新送审，于是
+// 整个会话永久失败。丢掉早期历史再试一次有机会绕开，但模型也看不到完整上下文，
+// 因此默认关闭（CODEARTS_TRIM_RETRY=N 才启用）。
+func trimMessages(req map[string]any, keep int) bool {
+	msgs, _ := req["messages"].([]any)
+	if keep <= 0 || len(msgs) <= keep {
+		return false
+	}
+
+	system := 0
+	for system < len(msgs) {
+		msg, _ := msgs[system].(map[string]any)
+		if msg == nil {
+			break
+		}
+		role, _ := msg["role"].(string)
+		if role != "system" && role != "developer" {
+			break
+		}
+		system++
+	}
+	if len(msgs)-keep <= system {
+		// 裁完连一条可丢弃的历史都没有，重试没有意义。
+		return false
+	}
+
+	trimmed := make([]any, 0, system+keep)
+	trimmed = append(trimmed, msgs[:system]...)
+	trimmed = append(trimmed, msgs[len(msgs)-keep:]...)
+	req["messages"] = trimmed
+	return openai.ShapeRequest(req) == nil
+}
+
+// streamResponse 严格按 OpenAI SSE 转发上游流（调用方已确认上游返回的是 SSE）。
 //
 // benefit 通道会补齐缺失的 finish_reason 与 [DONE]，并把 content:null 规范化为
 // 空字符串（部分 Agent Runtime 只接受字符串 content，会把 null chunk 误判为无响应）；
@@ -261,29 +399,6 @@ func (s *Server) streamResponse(w http.ResponseWriter, resp *http.Response, mode
 	h.Set("Cache-Control", "no-cache, no-transform")
 	h.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-
-	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-	// 上游偶尔会在请求 stream=true 时返回普通 JSON，包装成单个 SSE 帧。
-	if !strings.Contains(contentType, "text/event-stream") {
-		payload, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return
-		}
-		result := openai.ParseUpstream(payload)
-		if obj, ok := result.(map[string]any); ok {
-			for _, item := range asSlice(obj["choices"]) {
-				if choice, ok := item.(map[string]any); ok {
-					choice["finish_reason"] = openai.NormalizeFinishReason(choice["finish_reason"])
-				}
-			}
-		}
-		if encoded, err := marshalCompact(result); err == nil {
-			writeSSE(w, encoded)
-			writeSSEDone(w)
-			flush(flusher)
-		}
-		return
-	}
 
 	sawDone := false
 	sawFinishReason := false
@@ -315,6 +430,28 @@ func (s *Server) streamResponse(w http.ResponseWriter, resp *http.Response, mode
 		writeSSEDone(w)
 		flush(flusher)
 	}
+}
+
+// writeSingleSSEFrame 把单个聚合结果包装成合法的 SSE 流输出。
+//
+// 用于「客户端要流式、上游却回了普通 JSON」的场景；直接透传会让客户端把
+// JSON 当成一帧 data 去解析，包装后至少状态机是完整的。
+func writeSingleSSEFrame(w http.ResponseWriter, result any) {
+	flusher, _ := w.(http.Flusher)
+
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream; charset=utf-8")
+	h.Set("Cache-Control", "no-cache, no-transform")
+	h.Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	encoded, err := marshalCompact(result)
+	if err != nil {
+		return
+	}
+	writeSSE(w, encoded)
+	writeSSEDone(w)
+	flush(flusher)
 }
 
 // handleStreamLine 处理上游单行 SSE，并按需转发。

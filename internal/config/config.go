@@ -116,6 +116,9 @@ type Config struct {
 	BenefitStatePath string
 	// AutoClaim 为 true 时，代理每天首次收到请求会顺带签到一次。
 	AutoClaim bool
+	// TrimRetry 是内容审核命中后的降级重试条数：大于 0 时只重发开头 system
+	// 提示与尾部该条数的消息，0 表示不重试。
+	TrimRetry int
 	// Endpoints 是上游接口地址集合，可由环境变量覆盖。
 	Endpoints Endpoints
 	// ProxyKeys 是允许访问本代理的下游密钥集合。为空表示不鉴权（默认）。
@@ -161,6 +164,15 @@ func Load() (*Config, error) {
 
 	// 自动签到默认开启（关闭需显式设置 CODEARTS_AUTO_CLAIM=0/false/off/no）。
 	cfg.AutoClaim = parseBoolDefault(os.Getenv("CODEARTS_AUTO_CLAIM"), true)
+
+	// 审核降级重试默认关闭：裁掉历史会丢上下文，只在明确配置时启用。
+	if raw := strings.TrimSpace(os.Getenv("CODEARTS_TRIM_RETRY")); raw != "" {
+		count, err := strconv.Atoi(raw)
+		if err != nil || count < 0 {
+			return nil, fmt.Errorf("CODEARTS_TRIM_RETRY 非法: %q", raw)
+		}
+		cfg.TrimRetry = count
+	}
 
 	endpoints, err := loadEndpoints()
 	if err != nil {
