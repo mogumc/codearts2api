@@ -8,7 +8,7 @@ import (
 // clearEndpointEnv 清理端点相关环境变量。
 func clearEndpointEnv(t *testing.T) {
 	t.Helper()
-	for _, key := range []string{"CODEARTS_BASE_URL", "CODEARTS_OPENGW_BASE_URL"} {
+	for _, key := range []string{"CODEARTS_BASE_URL"} {
 		old, existed := os.LookupEnv(key)
 		_ = os.Unsetenv(key)
 		t.Cleanup(func() {
@@ -36,9 +36,6 @@ func TestDefaultEndpoints(t *testing.T) {
 	if endpoints.CodeArtsBase != DefaultCodeArtsBaseURL {
 		t.Errorf("CodeArtsBase = %q", endpoints.CodeArtsBase)
 	}
-	if endpoints.OpenGWBase != DefaultOpenGWBaseURL {
-		t.Errorf("OpenGWBase = %q", endpoints.OpenGWBase)
-	}
 }
 
 // TestEndpointPaths 验证各接口 URL 拼接正确（无重复或缺失斜杠）。
@@ -55,9 +52,6 @@ func TestEndpointPaths(t *testing.T) {
 			DefaultCodeArtsBaseURL + "/v1/agent-center/agents/useragents?offset=0&limit=100"},
 		{"AgentDetail", endpoints.AgentDetail("abc"),
 			DefaultCodeArtsBaseURL + "/v1/agent-center/agents/detail?agent_id=abc"},
-		{"BenefitClaim", endpoints.BenefitClaim(), DefaultOpenGWBaseURL + "/api/v1/benefit/claim"},
-		{"Balance", endpoints.Balance(), DefaultOpenGWBaseURL + "/api/v1/user/tokens/balance"},
-		{"GatewayConfig", endpoints.GatewayConfig(), DefaultOpenGWBaseURL + "/api/v1/gateway/config"},
 		// 活动积分走 CodeArts 基址根路径（不带 snap-manager），且必须带 channel。
 		{"CreditDelivery", endpoints.CreditDelivery(),
 			DefaultCodeArtsBaseURL + "/v1/ops/delivery?channel=IDE"},
@@ -85,7 +79,6 @@ func TestAgentDetailEscapesID(t *testing.T) {
 func TestEndpointsOverriddenByEnv(t *testing.T) {
 	prepareEnv(t)
 	t.Setenv("CODEARTS_BASE_URL", "https://codearts.example.com")
-	t.Setenv("CODEARTS_OPENGW_BASE_URL", "https://opengw.example.com")
 
 	cfg, err := Load()
 	if err != nil {
@@ -94,19 +87,13 @@ func TestEndpointsOverriddenByEnv(t *testing.T) {
 	if cfg.Endpoints.CodeArtsBase != "https://codearts.example.com" {
 		t.Errorf("CodeArtsBase = %q", cfg.Endpoints.CodeArtsBase)
 	}
-	if cfg.Endpoints.OpenGWBase != "https://opengw.example.com" {
-		t.Errorf("OpenGWBase = %q", cfg.Endpoints.OpenGWBase)
-	}
 	// 覆盖后各接口应指向新域名。
 	if got := cfg.Endpoints.Chat(); got != "https://codearts.example.com/api/v2/chat/completions" {
 		t.Errorf("Chat = %q", got)
 	}
-	if got := cfg.Endpoints.BenefitClaim(); got != "https://opengw.example.com/api/v1/benefit/claim" {
-		t.Errorf("BenefitClaim = %q", got)
-	}
 }
 
-// TestEndpointsPartialOverride 验证只覆盖其中一个基址时另一个保持默认。
+// TestEndpointsPartialOverride 验证只覆盖基址时其余配置保持默认。
 func TestEndpointsPartialOverride(t *testing.T) {
 	prepareEnv(t)
 	t.Setenv("CODEARTS_BASE_URL", "http://127.0.0.1:9999")
@@ -118,16 +105,12 @@ func TestEndpointsPartialOverride(t *testing.T) {
 	if cfg.Endpoints.CodeArtsBase != "http://127.0.0.1:9999" {
 		t.Errorf("CodeArtsBase = %q", cfg.Endpoints.CodeArtsBase)
 	}
-	if cfg.Endpoints.OpenGWBase != DefaultOpenGWBaseURL {
-		t.Errorf("未覆盖的 OpenGWBase 应保持默认, 得到 %q", cfg.Endpoints.OpenGWBase)
-	}
 }
 
 // TestEndpointsTrailingSlashTrimmed 验证末尾斜杠被去掉，避免拼出双斜杠。
 func TestEndpointsTrailingSlashTrimmed(t *testing.T) {
 	prepareEnv(t)
 	t.Setenv("CODEARTS_BASE_URL", "https://codearts.example.com/")
-	t.Setenv("CODEARTS_OPENGW_BASE_URL", "https://opengw.example.com///")
 
 	cfg, err := Load()
 	if err != nil {
@@ -135,9 +118,6 @@ func TestEndpointsTrailingSlashTrimmed(t *testing.T) {
 	}
 	if cfg.Endpoints.CodeArtsBase != "https://codearts.example.com" {
 		t.Errorf("CodeArtsBase = %q", cfg.Endpoints.CodeArtsBase)
-	}
-	if cfg.Endpoints.OpenGWBase != "https://opengw.example.com" {
-		t.Errorf("OpenGWBase = %q", cfg.Endpoints.OpenGWBase)
 	}
 	if got := cfg.Endpoints.Chat(); got != "https://codearts.example.com/api/v2/chat/completions" {
 		t.Errorf("Chat 出现双斜杠: %q", got)
@@ -182,16 +162,6 @@ func TestEndpointsRejectsInvalidURL(t *testing.T) {
 	}
 }
 
-// TestEndpointsRejectsInvalidOpenGW 验证 opengw 基址同样被校验。
-func TestEndpointsRejectsInvalidOpenGW(t *testing.T) {
-	prepareEnv(t)
-	t.Setenv("CODEARTS_OPENGW_BASE_URL", "not-a-url")
-
-	if _, err := Load(); err == nil {
-		t.Error("非法 opengw 基址应返回错误")
-	}
-}
-
 // TestNormalizeBaseURL 覆盖规范化细节。
 func TestNormalizeBaseURL(t *testing.T) {
 	cases := map[string]string{
@@ -221,9 +191,6 @@ func TestCodeArtsHostDefaultsToBaseHost(t *testing.T) {
 	if got := endpoints.CodeArtsHost(); got != "snap-access.cn-north-4.myhuaweicloud.com" {
 		t.Errorf("CodeArtsHost() = %q", got)
 	}
-	if got := endpoints.OpenGWHost(); got != "opengw.developer.huaweicloud.com" {
-		t.Errorf("OpenGWHost() = %q", got)
-	}
 }
 
 // TestHostFollowsReplacedBaseURL 验证替换 BaseUrl 时签名 host 自动跟随新域名。
@@ -232,14 +199,10 @@ func TestCodeArtsHostDefaultsToBaseHost(t *testing.T) {
 func TestHostFollowsReplacedBaseURL(t *testing.T) {
 	endpoints := Endpoints{
 		CodeArtsBase: "https://new-upstream.example.com/codearts",
-		OpenGWBase:   "https://new-gw.example.com/opengw",
 	}
 
 	if got := endpoints.CodeArtsHost(); got != "new-upstream.example.com" {
 		t.Errorf("CodeArtsHost() = %q, want new-upstream.example.com", got)
-	}
-	if got := endpoints.OpenGWHost(); got != "new-gw.example.com" {
-		t.Errorf("OpenGWHost() = %q, want new-gw.example.com", got)
 	}
 }
 
@@ -249,33 +212,11 @@ func TestHostFollowsReplacedBaseURL(t *testing.T) {
 func TestHostOverrideForProxy(t *testing.T) {
 	endpoints := Endpoints{
 		CodeArtsBase:       "https://proxy.example.com/codearts",
-		OpenGWBase:         "https://proxy.example.com/opengw",
 		CodeArtsSignedHost: "snap-access.cn-north-4.myhuaweicloud.com",
-		OpenGWSignedHost:   "opengw.developer.huaweicloud.com",
 	}
 
 	if got := endpoints.CodeArtsHost(); got != "snap-access.cn-north-4.myhuaweicloud.com" {
 		t.Errorf("CodeArtsHost() = %q", got)
-	}
-	if got := endpoints.OpenGWHost(); got != "opengw.developer.huaweicloud.com" {
-		t.Errorf("OpenGWHost() = %q", got)
-	}
-}
-
-// TestHostOverrideIsIndependentPerChannel 验证两个通道的 host 覆盖互不影响。
-func TestHostOverrideIsIndependentPerChannel(t *testing.T) {
-	endpoints := Endpoints{
-		CodeArtsBase:       "https://proxy.example.com/codearts",
-		OpenGWBase:         "https://proxy.example.com/opengw",
-		CodeArtsSignedHost: "snap-access.cn-north-4.myhuaweicloud.com",
-		// OpenGWSignedHost 留空：应回退到基址 host
-	}
-
-	if got := endpoints.CodeArtsHost(); got != "snap-access.cn-north-4.myhuaweicloud.com" {
-		t.Errorf("已覆盖的通道 = %q", got)
-	}
-	if got := endpoints.OpenGWHost(); got != "proxy.example.com" {
-		t.Errorf("未覆盖的通道应取基址 host, 得到 %q", got)
 	}
 }
 
@@ -283,9 +224,7 @@ func TestHostOverrideIsIndependentPerChannel(t *testing.T) {
 func TestLoadEndpointsSignedHostFromEnv(t *testing.T) {
 	prepareEnv(t)
 	t.Setenv("CODEARTS_BASE_URL", "https://proxy.example.com/codearts")
-	t.Setenv("CODEARTS_OPENGW_BASE_URL", "https://proxy.example.com/opengw")
 	t.Setenv("CODEARTS_BASE_HOST", "snap-access.cn-north-4.myhuaweicloud.com")
-	t.Setenv("CODEARTS_OPENGW_BASE_HOST", "opengw.developer.huaweicloud.com")
 
 	cfg, err := Load()
 	if err != nil {
@@ -293,9 +232,6 @@ func TestLoadEndpointsSignedHostFromEnv(t *testing.T) {
 	}
 	if got := cfg.Endpoints.CodeArtsHost(); got != "snap-access.cn-north-4.myhuaweicloud.com" {
 		t.Errorf("CodeArtsHost() = %q", got)
-	}
-	if got := cfg.Endpoints.OpenGWHost(); got != "opengw.developer.huaweicloud.com" {
-		t.Errorf("OpenGWHost() = %q", got)
 	}
 }
 

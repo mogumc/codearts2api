@@ -20,8 +20,6 @@ services:
       # 通过中转访问时才需要，直连官方地址留空即可。
       # CODEARTS_BASE_URL: "https://relay.example.com/codearts"
       # CODEARTS_BASE_HOST: "snap-access.cn-north-4.myhuaweicloud.com"
-      # CODEARTS_OPENGW_BASE_URL: "https://relay.example.com/opengw"
-      # CODEARTS_OPENGW_BASE_HOST: "opengw.developer.huaweicloud.com"
     volumes:
       # 持久化模型缓存与签到状态，容器重建后不丢失。
       - codearts2api-data:/data

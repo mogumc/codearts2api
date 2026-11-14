@@ -1,11 +1,8 @@
 // Package catalog 维护当前账号可用模型列表。
 //
-// 模型来自两条互斥通道：
-//   - agent：CodeArts AgentCenter 老套餐模型，走基础签名；
-//   - benefit：opengw 免费额度模型，签名时必须额外携带 maas_type / model-id /
-//     model-name 三个头，否则上游报 "model is not registered"。
-//
-// 不在已知列表中的模型一律按 benefit 处理，这样上游新增免费模型无需改代码。
+// 模型只来自 CodeArts AgentCenter，走基础签名。opengw 的免费额度通道
+// （gateway/config 与配套的 maas_type 头）已于 2026-10 随官方活动一起下线，
+// 上游对该通道的所有接口一律返回 4000: invalid channel, group not found。
 package catalog
 
 import (
@@ -24,20 +21,17 @@ import (
 	"codearts2api/internal/upstream"
 )
 
-// 通道标识。
-const (
-	ChannelAgent   = "agent"
-	ChannelBenefit = "benefit"
-)
+// ChannelAgent 是当前唯一的模型来源通道。
+const ChannelAgent = "agent"
+
+// legacyBenefitChannel 是已下线的免费额度通道标记，仅用于丢弃旧缓存里的条目。
+const legacyBenefitChannel = "benefit"
 
 // cacheTTL 是模型列表的短时缓存周期，避免客户端频繁轮询时重复请求上游。
 const cacheTTL = 300 * time.Second
 
 // FallbackAgentModels 是 AgentCenter 同步失败时的兜底列表。
 var FallbackAgentModels = []string{"openpangu-2.0-pro", "openpangu-2.0-flash", "GLM-5.2"}
-
-// FallbackBenefitModels 是 opengw 同步失败时的兜底列表。
-var FallbackBenefitModels = []string{"glm-5.3-flash", "deepseek-v4-pro-0813", "deepseek-v4-flash-0731"}
 
 // Model 描述一个模型的能力元数据。
 type Model struct {
@@ -61,34 +55,29 @@ type CacheFile struct {
 
 // Catalog 是并发安全的模型目录。
 type Catalog struct {
-	// codeArtsClient 访问 CodeArts 基址（AgentCenter），gatewayClient 访问
-	// opengw 基址（免费模型列表）。两者签名 host 不同，因此各用一个客户端。
+	// codeArtsClient 访问 CodeArts 基址（AgentCenter）。
 	codeArtsClient *upstream.Client
-	gatewayClient  *upstream.Client
 
 	cachePath string
 	endpoints config.Endpoints
 
 	refreshMu sync.Mutex
 
-	mu       sync.RWMutex
-	order    []string
-	details  map[string]Model
-	agentIDs map[string]struct{}
+	mu      sync.RWMutex
+	order   []string
+	details map[string]Model
 }
 
 // New 构造模型目录：优先装载本地缓存，缓存不可用时退回内置兜底列表。
 //
-// codeArtsClient / gatewayClient 需分别绑定好各自通道的签名 host
-// （见 config.Endpoints 的 CodeArtsHost / OpenGWHost）。
-func New(codeArtsClient, gatewayClient *upstream.Client, cachePath string, endpoints config.Endpoints) *Catalog {
+// codeArtsClient 需绑定好 CodeArts 通道的签名 host（见 config.Endpoints
+// 的 CodeArtsHost）。
+func New(codeArtsClient *upstream.Client, cachePath string, endpoints config.Endpoints) *Catalog {
 	c := &Catalog{
 		codeArtsClient: codeArtsClient,
-		gatewayClient:  gatewayClient,
 		cachePath:      cachePath,
 		endpoints:      endpoints,
 		details:        map[string]Model{},
-		agentIDs:       map[string]struct{}{},
 	}
 	if !c.LoadCache() {
 		c.applyFallback()
@@ -127,14 +116,6 @@ func (c *Catalog) Lookup(id string) (Model, bool) {
 // Contains 判断模型是否在当前可用列表中。
 func (c *Catalog) Contains(id string) bool {
 	_, ok := c.Lookup(id)
-	return ok
-}
-
-// IsAgentChannel 判断模型是否走 AgentCenter（老套餐）通道。
-func (c *Catalog) IsAgentChannel(id string) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	_, ok := c.agentIDs[id]
 	return ok
 }
 
@@ -188,23 +169,6 @@ func (c *Catalog) Refresh(ctx context.Context) bool {
 		return false
 	}
 
-	benefitModels := c.fetchBenefitModels(ctx)
-	if len(benefitModels) == 0 {
-		benefitModels = fallbackBenefitModels()
-	}
-
-	known := make(map[string]struct{}, len(discovered))
-	for _, m := range discovered {
-		known[m.ID] = struct{}{}
-	}
-	for _, m := range benefitModels {
-		if _, dup := known[m.ID]; dup {
-			continue
-		}
-		known[m.ID] = struct{}{}
-		discovered = append(discovered, m)
-	}
-
 	c.store(discovered)
 	c.SaveCache(discovered)
 	return true
@@ -228,10 +192,12 @@ func (c *Catalog) LoadCache() bool {
 		if m.ID == "" {
 			continue
 		}
-		if m.Channel == "" {
-			// 旧缓存无 channel 字段时默认视为 agent 通道。
-			m.Channel = ChannelAgent
+		// 旧缓存里可能残留已下线通道的模型：留着会被当成可用模型返回，
+		// 选中后必然失败，所以装载时直接丢弃。
+		if m.Channel == legacyBenefitChannel {
+			continue
 		}
+		m.Channel = ChannelAgent
 		if m.Object == "" {
 			m.Object = "model"
 		}
@@ -268,34 +234,20 @@ func (c *Catalog) SaveCache(models []Model) {
 
 // applyFallback 装载内置兜底模型。
 func (c *Catalog) applyFallback() {
-	models := make([]Model, 0, len(FallbackAgentModels)+len(FallbackBenefitModels))
+	models := make([]Model, 0, len(FallbackAgentModels))
 	for _, id := range FallbackAgentModels {
 		models = append(models, Model{
 			ID: id, Object: "model", OwnedBy: "codearts",
 			Channel: ChannelAgent, Name: id,
 		})
 	}
-	models = append(models, fallbackBenefitModels()...)
 	c.store(models)
-}
-
-func fallbackBenefitModels() []Model {
-	models := make([]Model, 0, len(FallbackBenefitModels))
-	for _, id := range FallbackBenefitModels {
-		models = append(models, Model{
-			ID: id, Object: "model", OwnedBy: "codearts",
-			Channel: ChannelBenefit, Name: id,
-			Description: "免费额度模型（签到领取）",
-		})
-	}
-	return models
 }
 
 // store 用新列表替换当前目录内容。
 func (c *Catalog) store(models []Model) {
 	order := make([]string, 0, len(models))
 	details := make(map[string]Model, len(models))
-	agentIDs := map[string]struct{}{}
 	for _, m := range models {
 		if m.ID == "" {
 			continue
@@ -305,14 +257,10 @@ func (c *Catalog) store(models []Model) {
 		}
 		order = append(order, m.ID)
 		details[m.ID] = m
-		if m.Channel == ChannelAgent {
-			agentIDs[m.ID] = struct{}{}
-		}
 	}
 	c.mu.Lock()
 	c.order = order
 	c.details = details
-	c.agentIDs = agentIDs
 	c.mu.Unlock()
 }
 
@@ -454,58 +402,6 @@ func (c *Catalog) fetchAgentDetail(ctx context.Context, detailURL string, header
 		})
 	}
 	return models, len(models) > 0
-}
-
-// fetchBenefitModels 从 opengw 网关拉取免费模型列表。
-func (c *Catalog) fetchBenefitModels(ctx context.Context) []Model {
-	resp, err := c.gatewayClient.Do(ctx, http.MethodGet, c.endpoints.GatewayConfig(), nil, nil)
-	if err != nil {
-		fmt.Println("免费模型列表同步失败，将使用兜底列表:", err)
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("免费模型列表同步失败，将使用兜底列表: HTTP %d\n", resp.StatusCode)
-		return nil
-	}
-
-	var payload struct {
-		Result struct {
-			Models []struct {
-				ModelID       string `json:"model_id"`
-				ModelName     string `json:"model_name"`
-				ContextWindow *int64 `json:"context_window"`
-				MaxTokens     *int64 `json:"max_tokens"`
-			} `json:"models"`
-		} `json:"result"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		fmt.Println("免费模型列表同步失败，将使用兜底列表:", err)
-		return nil
-	}
-
-	seen := map[string]struct{}{}
-	var discovered []Model
-	for _, m := range payload.Result.Models {
-		if m.ModelID == "" {
-			continue
-		}
-		if _, dup := seen[m.ModelID]; dup {
-			continue
-		}
-		seen[m.ModelID] = struct{}{}
-		discovered = append(discovered, Model{
-			ID:            m.ModelID,
-			Object:        "model",
-			OwnedBy:       "codearts",
-			Channel:       ChannelBenefit,
-			Name:          firstNonEmpty(m.ModelName, m.ModelID),
-			Description:   "免费额度模型（签到领取）",
-			ContextWindow: m.ContextWindow,
-			MaxTokens:     m.MaxTokens,
-		})
-	}
-	return discovered
 }
 
 func firstNonEmpty(values ...string) string {

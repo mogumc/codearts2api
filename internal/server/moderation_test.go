@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"codearts2api/internal/catalog"
 )
 
 // moderationBody 是上游内容审核命中的典型响应体（HTTP 403）。
@@ -25,7 +24,7 @@ func TestChatContentModerationReturns403(t *testing.T) {
 	}))
 	defer fake.Close()
 
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.chatURL = fake.URL
 
 	rec := httptest.NewRecorder()
@@ -64,12 +63,12 @@ func TestChatContentModerationInStreamReturns403(t *testing.T) {
 	}))
 	defer fake.Close()
 
-	srv := newTestServerFor(t, "glm-5.3-flash", catalog.ChannelBenefit)
+	srv := newTestServerFor(t, "GLM-5.2")
 	srv.chatURL = fake.URL
 
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
-		strings.NewReader(`{"model":"glm-5.3-flash","stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
+		strings.NewReader(`{"model":"GLM-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403, body = %s", rec.Code, rec.Body.String())
@@ -93,7 +92,7 @@ func TestChatNonStreamEmbeddedModerationReturns403(t *testing.T) {
 	}))
 	defer fake.Close()
 
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.chatURL = fake.URL
 
 	rec := httptest.NewRecorder()
@@ -158,7 +157,7 @@ func TestChatBodyCarriesChatID(t *testing.T) {
 	}))
 	defer fake.Close()
 
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.chatURL = fake.URL
 
 	request := func() {
@@ -212,7 +211,7 @@ func TestChatTrimRetryOnModeration(t *testing.T) {
 	}))
 	defer fake.Close()
 
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.chatURL = fake.URL
 	srv.trimRetry = 2
 
@@ -257,7 +256,7 @@ func TestChatNoTrimRetryWhenDisabled(t *testing.T) {
 	}))
 	defer fake.Close()
 
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.chatURL = fake.URL
 
 	rec := httptest.NewRecorder()

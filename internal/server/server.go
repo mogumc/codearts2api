@@ -184,10 +184,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 放在校验之后，避免畸形请求或错误的模型名触发签到。
 	s.triggerAutoClaim()
 
-	// 通道判断：AgentCenter 老套餐模型用基础签名；其余（免费 benefit 模型）
-	// 必须带 maas_type/model-id/model-name 三个签名头，否则上游报未注册。
-	benefit := !s.catalog.IsAgentChannel(model)
-
 	// 客户端是否要流式，在整形之前取——整形对带工具的请求会强制上游走流式，
 	// 不能让它改变对客户端的响应方式。
 	wantStream, _ := req["stream"].(bool)
@@ -216,14 +212,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 固定头（app-id / X-Language / Accept 等）与 benefit 的三个头都必须参与
-	// 签名，因此统一交给上游客户端处理。
+	// 固定头（app-id / X-Language / Accept 等）必须参与签名，因此统一交给
+	// 上游客户端处理。
 	headers := upstream.ChatHeaders("")
-	if benefit {
-		headers["maas_type"] = "benefit"
-		headers["model-id"] = model
-		headers["model-name"] = model
-	}
 	// Chat-Id / Session-Id 在签名之后追加，不进入 SignedHeaders。
 	unsigned := map[string]string{
 		"Chat-Id":    chatID,
@@ -279,7 +270,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if wantStream {
-		s.streamResponse(w, resp, model, benefit)
+		s.streamResponse(w, resp)
 		return
 	}
 
@@ -388,10 +379,8 @@ func trimMessages(req map[string]any, keep int) bool {
 
 // streamResponse 严格按 OpenAI SSE 转发上游流（调用方已确认上游返回的是 SSE）。
 //
-// benefit 通道会补齐缺失的 finish_reason 与 [DONE]，并把 content:null 规范化为
-// 空字符串（部分 Agent Runtime 只接受字符串 content，会把 null chunk 误判为无响应）；
-// agent 通道保持即时转发行为，避免改变既有客户端状态机。
-func (s *Server) streamResponse(w http.ResponseWriter, resp *http.Response, model string, benefit bool) {
+// 上游异常断流、没有发送 [DONE] 时补一个，保证客户端状态机完整。
+func (s *Server) streamResponse(w http.ResponseWriter, resp *http.Response) {
 	flusher, _ := w.(http.Flusher)
 
 	h := w.Header()
@@ -401,31 +390,18 @@ func (s *Server) streamResponse(w http.ResponseWriter, resp *http.Response, mode
 	w.WriteHeader(http.StatusOK)
 
 	sawDone := false
-	sawFinishReason := false
 
 	reader := newSSEReader(resp.Body)
 	for {
 		line, err := reader.readLine()
 		if line != nil {
-			s.handleStreamLine(w, flusher, *line, benefit, &sawDone, &sawFinishReason)
+			s.handleStreamLine(w, flusher, *line, &sawDone)
 		}
 		if err != nil {
-			// 上游异常断流时不中断响应，交给下面的补帧逻辑收尾。
 			break
 		}
 	}
 
-	if benefit {
-		// 只对免费 benefit 模型补齐完全缺失的 finish_reason；不重发任何上游 chunk。
-		if !sawFinishReason {
-			writeSSE(w, finishFrame(model))
-		}
-		// 上游 [DONE] 被延迟到这里，确保补块在 [DONE] 之前。
-		writeSSEDone(w)
-		flush(flusher)
-		return
-	}
-	// agent 分支保持原有行为：上游异常断流、没有发送 [DONE] 时补一个。
 	if !sawDone {
 		writeSSEDone(w)
 		flush(flusher)
@@ -456,9 +432,8 @@ func writeSingleSSEFrame(w http.ResponseWriter, result any) {
 
 // handleStreamLine 处理上游单行 SSE，并按需转发。
 //
-// benefit 通道延迟转发 [DONE]（等补帧完成后再发）；agent 通道收到 [DONE] 立即
-// 转发，保持与参考实现一致的即时行为。
-func (s *Server) handleStreamLine(w io.Writer, flusher http.Flusher, line string, benefit bool, sawDone, sawFinishReason *bool) {
+// [DONE] 立即透传；上游重复发送时只转发一次。
+func (s *Server) handleStreamLine(w io.Writer, flusher http.Flusher, line string, sawDone *bool) {
 	trimmed := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
 	if trimmed == "" {
 		return
@@ -474,14 +449,9 @@ func (s *Server) handleStreamLine(w io.Writer, flusher http.Flusher, line string
 
 	payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
 	if payload == "[DONE]" {
-		if !benefit {
-			if !*sawDone {
-				writeSSEDone(w)
-				flush(flusher)
-				*sawDone = true
-			}
-		} else {
-			// 延迟到补帧之后再发。
+		if !*sawDone {
+			writeSSEDone(w)
+			flush(flusher)
 			*sawDone = true
 		}
 		return
@@ -496,13 +466,11 @@ func (s *Server) handleStreamLine(w io.Writer, flusher http.Flusher, line string
 		if !ok {
 			continue
 		}
-		if reason, exists := choice["finish_reason"]; exists && reason != nil {
-			*sawFinishReason = true
-			if reason == "other" {
-				choice["finish_reason"] = "stop"
-			}
+		if reason, exists := choice["finish_reason"]; exists && reason != nil && reason == "other" {
+			choice["finish_reason"] = "stop"
 		}
-		// DeepSeek benefit 流会发送 content:null、reasoning_content 有值。
+		// 部分模型会发送 content:null、reasoning_content 有值。Agent Runtime
+		// 只接受字符串 content，null chunk 会被误判为无响应，这里统一规范化。
 		if delta, ok := choice["delta"].(map[string]any); ok {
 			if value, exists := delta["content"]; exists && value == nil {
 				delta["content"] = ""
@@ -513,21 +481,6 @@ func (s *Server) handleStreamLine(w io.Writer, flusher http.Flusher, line string
 		writeSSE(w, encoded)
 		flush(flusher)
 	}
-}
-
-// finishFrame 生成补齐用的结束帧。
-func finishFrame(model string) []byte {
-	frame := map[string]any{
-		"id":      openai.NewChunkID(),
-		"object":  "chat.completion.chunk",
-		"created": openai.Now(),
-		"model":   model,
-		"choices": []any{
-			map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"},
-		},
-	}
-	encoded, _ := marshalCompact(frame)
-	return encoded
 }
 
 // modelPayload 生成 OpenAI 模型对象，并附带常见能力元数据。

@@ -1,9 +1,7 @@
 // 活动积分领取：每日签到与新用户礼包。
 //
-// 与「限时福利额度」是两套独立账本：
-//   - 福利额度走 opengw.developer.huaweicloud.com 的 /api/v1/benefit/claim；
-//   - 活动积分走 CodeArts snap 根路径的 /v1/ops/*，签名 host 也不同。
-//
+// 走 CodeArts snap 根路径的 /v1/ops/*（AK/SK 签名 + Agent-Type: PromptCenter，
+// 注意不是 snap-manager 前缀）。
 // 接口形状（AK/SK 签名 + Agent-Type: PromptCenter，注意不是 snap-manager 前缀）：
 //
 //	GET  /v1/ops/delivery?channel=IDE  活动列表，返回 {code:0,data:{items:[...]}}
@@ -134,7 +132,7 @@ func (c *Credit) Checkin(ctx context.Context) (CheckinResult, error) {
 		if campaign.ID != campaignDaily && campaign.ID != campaignNewUser {
 			continue
 		}
-		// 只处理积分活动；额度类活动由 benefit.Client 负责。
+		// 只处理积分活动；额度类活动（若有）不归签到管。
 		if campaign.BenefitUnit != "" && campaign.BenefitUnit != "CREDIT" {
 			continue
 		}

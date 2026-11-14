@@ -21,11 +21,7 @@ const claimTimeout = 30 * time.Second
 //   - 判断只需一次加锁读取内存中的日期字符串，不触网、不读盘；
 //   - 真正的签到在网络请求的 goroutine 里异步执行，绝不阻塞用户请求；
 //   - 每天最多成功签到一次，失败后按 retryBackoff 退避。
-//
-// 签到分两套账本：活动积分（credit，当前有效入口）与免费额度（client）。
-// 挂了 credit 就视为签到以它为准，免费额度只做 best-effort。
 type AutoClaimer struct {
-	client    *Client
 	credit    *Credit
 	statePath string
 
@@ -38,27 +34,17 @@ type AutoClaimer struct {
 }
 
 // NewAutoClaimer 构造自动签到器，并从磁盘恢复上次的签到状态。
-func NewAutoClaimer(client *Client, statePath string, logf func(string, ...any)) *AutoClaimer {
+func NewAutoClaimer(credit *Credit, statePath string, logf func(string, ...any)) *AutoClaimer {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
 	return &AutoClaimer{
-		client:    client,
+		credit:    credit,
 		statePath: statePath,
 		state:     LoadState(statePath),
 		now:       time.Now,
 		logf:      logf,
 	}
-}
-
-// SetCredit 挂上活动积分客户端。
-//
-// 未设置时只做免费额度签到（旧行为）；设置后先领活动积分，再顺带领免费额度。
-// 必须在开始处理请求之前调用（main 里的装配顺序天然满足）。
-func (a *AutoClaimer) SetCredit(credit *Credit) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.credit = credit
 }
 
 // State 返回当前签到状态快照。
@@ -117,60 +103,39 @@ func (a *AutoClaimer) claimAsync() {
 	credit := a.credit
 	a.mu.Unlock()
 
-	// 活动积分是当前有效的签到入口。
-	var creditResult CheckinResult
-	var creditErr error
-	if credit != nil {
-		creditResult, creditErr = credit.Checkin(ctx)
-	}
-
-	// 免费额度是另一套账本，失败只记提示，不否定签到本身。
-	var benefitErr error
-	var claimTime int64
-	if a.client != nil {
-		info, err := a.client.Claim(ctx)
-		benefitErr = err
-		if err == nil {
-			claimTime = int64(number(info["create_time"]))
-		}
-	}
-
 	success := false
 	failure := ""
-	warning := ""
+	message := ""
+
 	switch {
-	case credit != nil:
+	case credit == nil:
+		failure = "未配置活动积分客户端"
+	default:
+		result, err := credit.Checkin(ctx)
 		switch {
-		case creditErr != nil:
-			failure = creditErr.Error()
-		case !creditResult.OK:
-			failure = creditResult.Message
+		case err != nil && isAlreadyClaimed(err):
+			// 上游认定今天已经领过：按成功处理，避免当天反复重试。
+			success = true
+			message = "今日已领取"
+		case err != nil:
+			failure = err.Error()
+		case !result.OK:
+			failure = result.Message
 			if failure == "" {
 				failure = "活动积分领取未全部成功"
 			}
 		default:
 			success = true
+			message = result.Message
 		}
-		if benefitErr != nil && !isAlreadyClaimed(benefitErr) {
-			warning = "免费额度签到失败: " + benefitErr.Error()
-		}
-	case benefitErr == nil, isAlreadyClaimed(benefitErr):
-		success = true
-	default:
-		failure = benefitErr.Error()
 	}
 
 	a.mu.Lock()
 	a.state.LastAttemptAt = a.now().UnixMilli()
-	a.state.LastWarning = warning
 	if success {
 		a.state.LastSuccessDate = a.now().Format(dateLayout)
 		a.state.LastError = ""
-		if claimTime > 0 {
-			a.state.LastClaimTime = claimTime
-		} else {
-			a.state.LastClaimTime = a.now().UnixMilli()
-		}
+		a.state.LastClaimTime = a.now().UnixMilli()
 	} else {
 		a.state.LastError = failure
 	}
@@ -185,14 +150,11 @@ func (a *AutoClaimer) claimAsync() {
 		a.logf("自动签到失败（%v 后重试）: %s", retryBackoff, failure)
 		return
 	}
-	if creditResult.Message != "" {
-		a.logf("自动签到成功: %s", creditResult.Message)
-	} else {
-		a.logf("自动签到成功，签到时间: %s", formatMillis(snapshot.LastClaimTime))
+	if message != "" {
+		a.logf("自动签到成功: %s", message)
+		return
 	}
-	if snapshot.LastWarning != "" {
-		a.logf("%s", snapshot.LastWarning)
-	}
+	a.logf("自动签到成功，签到时间: %s", formatMillis(snapshot.LastClaimTime))
 }
 
 // isAlreadyClaimed 识别「今日已领取」类业务错误。
@@ -201,7 +163,7 @@ func (a *AutoClaimer) claimAsync() {
 // 避免当天反复重试，也不会把状态标记成异常。
 //
 // 判断刻意保持保守：误判的代价是把「真实失败」当成已签到，从而丢掉一天的
-// 额度。所以先排除否定语义，再要求出现「已领取」关键词。
+// 积分。所以先排除否定语义，再要求出现「已领取」关键词。
 //
 // 必须排除否定语义的原因：claimed 会命中 "not claimed" / "unclaimed" /
 // "nothing claimed" 这类「尚未领取」的表述，把它们当成已签到会让当天不再
@@ -254,11 +216,7 @@ func (a *AutoClaimer) Describe() string {
 	state := a.State()
 	today := time.Now().Format(dateLayout)
 	if state.claimedOn(today) {
-		desc := fmt.Sprintf("今日已签到（%s）", formatMillis(state.LastClaimTime))
-		if state.LastWarning != "" {
-			desc += "；" + truncate(state.LastWarning, 160)
-		}
-		return desc
+		return fmt.Sprintf("今日已签到（%s）", formatMillis(state.LastClaimTime))
 	}
 	if state.LastError != "" {
 		return fmt.Sprintf("今日尚未签到，上次失败: %s", state.LastError)

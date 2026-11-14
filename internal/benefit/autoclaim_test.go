@@ -2,65 +2,21 @@ package benefit
 
 import (
 	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"codearts2api/internal/config"
-	"codearts2api/internal/signer"
 )
 
-// fakeClaimServer 统计签到调用次数，便于验证「每天只签一次」。
-type fakeClaimServer struct {
-	mu    sync.Mutex
-	posts int
-	gets  int
-	// respond 可自定义响应，返回 false 时使用默认成功响应。
-	respond func(w http.ResponseWriter, r *http.Request) bool
-}
+// 每日签到活动的最小成功响应：ELIGIBLE + 可领取。
+const dailyELIGIBLE = `{"campaignId":1,"title":"每日签到","status":"ELIGIBLE","claimable":true,"benefitUnit":"CREDIT","pendingTotalAmount":5}`
 
-func (f *fakeClaimServer) handler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			f.mu.Lock()
-			f.posts++
-			f.mu.Unlock()
-		} else {
-			f.mu.Lock()
-			f.gets++
-			f.mu.Unlock()
-		}
-		if f.respond != nil && f.respond(w, r) {
-			return
-		}
-		_, _ = io.WriteString(w, `{"error_code":"0000","result":{"create_time":1789539411000}}`)
-	})
-}
-
-func (f *fakeClaimServer) postCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.posts
-}
-
-// newAutoClaimer 构造指向假上游的自动签到器。
-func newAutoClaimer(t *testing.T, fake *fakeClaimServer, statePath string) *AutoClaimer {
+// newTestAutoClaimer 构造指向假活动接口的自动签到器。
+func newTestAutoClaimer(t *testing.T, rec *creditRecorder, statePath string) *AutoClaimer {
 	t.Helper()
-	server := httptest.NewServer(fake.handler())
-	t.Cleanup(server.Close)
-
-	client := New(signer.New("demo-ak", "demo-sk"), config.DefaultEndpoints())
-	client.claimURL = server.URL + "/api/v1/benefit/claim"
-	client.balanceURL = server.URL + "/api/v1/user/tokens/balance"
-	client.configURL = server.URL + "/api/v1/gateway/config"
-
-	return NewAutoClaimer(client, statePath, nil)
+	return NewAutoClaimer(newTestCredit(t, rec), statePath, nil)
 }
 
 // waitFor 轮询等待条件成立，避免测试依赖固定 sleep。
@@ -94,21 +50,20 @@ func waitIdle(t *testing.T, claimer *AutoClaimer) {
 
 // TestClaimOncePerDay 是核心用例：同一天多次调用只签到一次。
 func TestClaimOncePerDay(t *testing.T) {
-	fake := &fakeClaimServer{}
-	statePath := filepath.Join(t.TempDir(), "benefit-state.json")
-	claimer := newAutoClaimer(t, fake, statePath)
+	rec := &creditRecorder{deliveryBody: deliveryJSON(dailyELIGIBLE)}
+	claimer := newTestAutoClaimer(t, rec, filepath.Join(t.TempDir(), "benefit-state.json"))
 
 	// 模拟一天内 20 个请求。
 	for i := 0; i < 20; i++ {
 		claimer.MaybeClaim()
 	}
 
-	if !waitFor(t, 3*time.Second, func() bool { return fake.postCount() == 1 }) {
-		t.Fatalf("签到次数 = %d, 期望 1", fake.postCount())
+	if !waitFor(t, 3*time.Second, func() bool { return rec.deliveryCount() == 1 }) {
+		t.Fatalf("签到次数 = %d, 期望 1", rec.deliveryCount())
 	}
 	// 等后台任务彻底收尾后再断言，确认不会再多打。
 	waitIdle(t, claimer)
-	if got := fake.postCount(); got != 1 {
+	if got := rec.deliveryCount(); got != 1 {
 		t.Errorf("签到次数 = %d, 期望恰好 1 次", got)
 	}
 }
@@ -118,19 +73,19 @@ func TestClaimOncePerDay(t *testing.T) {
 // 这里不比较墙钟耗时（-race 等场景下阈值不可靠），而是直接验证语义：
 // 上游响应被挂住不放时，MaybeClaim 依然能立即返回。
 func TestMaybeClaimDoesNotBlock(t *testing.T) {
-	// release 控制上游响应何时返回；在此之前请求会一直挂着。
 	release := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	fake := &fakeClaimServer{respond: func(w http.ResponseWriter, r *http.Request) bool {
-		select {
-		case entered <- struct{}{}:
-		default:
-		}
-		<-release
-		return false
-	}}
-	statePath := filepath.Join(t.TempDir(), "benefit-state.json")
-	claimer := newAutoClaimer(t, fake, statePath)
+	rec := &creditRecorder{
+		deliveryBody: deliveryJSON(dailyELIGIBLE),
+		deliveryHook: func() {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+		},
+	}
+	claimer := newTestAutoClaimer(t, rec, filepath.Join(t.TempDir(), "benefit-state.json"))
 
 	done := make(chan struct{})
 	go func() {
@@ -159,7 +114,7 @@ func TestMaybeClaimDoesNotBlock(t *testing.T) {
 
 // TestNoClaimWhenAlreadyClaimedToday 验证当天已签到后不再请求上游。
 func TestNoClaimWhenAlreadyClaimedToday(t *testing.T) {
-	fake := &fakeClaimServer{}
+	rec := &creditRecorder{deliveryBody: deliveryJSON(dailyELIGIBLE)}
 	statePath := filepath.Join(t.TempDir(), "benefit-state.json")
 
 	// 预置「今天已签到」状态。
@@ -168,20 +123,20 @@ func TestNoClaimWhenAlreadyClaimedToday(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	claimer := newAutoClaimer(t, fake, statePath)
+	claimer := newTestAutoClaimer(t, rec, statePath)
 	for i := 0; i < 10; i++ {
 		claimer.MaybeClaim()
 	}
 	waitIdle(t, claimer)
 
-	if got := fake.postCount(); got != 0 {
+	if got := rec.deliveryCount(); got != 0 {
 		t.Errorf("当天已签到却发起了 %d 次请求", got)
 	}
 }
 
 // TestNewDayTriggersClaim 验证跨天后会重新签到。
 func TestNewDayTriggersClaim(t *testing.T) {
-	fake := &fakeClaimServer{}
+	rec := &creditRecorder{deliveryBody: deliveryJSON(dailyELIGIBLE)}
 	statePath := filepath.Join(t.TempDir(), "benefit-state.json")
 
 	// 预置昨天的签到记录。
@@ -190,20 +145,20 @@ func TestNewDayTriggersClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	claimer := newAutoClaimer(t, fake, statePath)
+	claimer := newTestAutoClaimer(t, rec, statePath)
 	claimer.MaybeClaim()
 
-	if !waitFor(t, 3*time.Second, func() bool { return fake.postCount() == 1 }) {
-		t.Fatalf("跨天应重新签到, 实际 %d 次", fake.postCount())
+	if !waitFor(t, 3*time.Second, func() bool { return rec.deliveryCount() == 1 }) {
+		t.Fatalf("跨天应重新签到, 实际 %d 次", rec.deliveryCount())
 	}
 }
 
 // TestStatePersistedAcrossRestart 验证签到状态落盘，重启后不会重复签到。
 func TestStatePersistedAcrossRestart(t *testing.T) {
-	fake := &fakeClaimServer{}
+	rec := &creditRecorder{deliveryBody: deliveryJSON(dailyELIGIBLE)}
 	statePath := filepath.Join(t.TempDir(), "benefit-state.json")
 
-	first := newAutoClaimer(t, fake, statePath)
+	first := newTestAutoClaimer(t, rec, statePath)
 	first.MaybeClaim()
 
 	// 等到状态真正落盘（请求发出 ≠ 状态已保存）。
@@ -213,9 +168,10 @@ func TestStatePersistedAcrossRestart(t *testing.T) {
 	}) {
 		t.Fatal("签到状态未落盘")
 	}
+	waitIdle(t, first)
 
 	// 模拟进程重启：新建实例应读到已签到的日期。
-	second := newAutoClaimer(t, fake, statePath)
+	second := newTestAutoClaimer(t, rec, statePath)
 	if !second.State().claimedOn(time.Now().Format(dateLayout)) {
 		t.Fatal("重启后应保留今日已签到状态")
 	}
@@ -224,32 +180,27 @@ func TestStatePersistedAcrossRestart(t *testing.T) {
 	}
 	waitIdle(t, second)
 
-	if got := fake.postCount(); got != 1 {
+	if got := rec.deliveryCount(); got != 1 {
 		t.Errorf("重启后不应重复签到, 总次数 = %d", got)
 	}
 }
 
 // TestFailureBackoff 验证签到失败后按退避时间重试，而不是每个请求都打。
 func TestFailureBackoff(t *testing.T) {
-	fake := &fakeClaimServer{respond: func(w http.ResponseWriter, r *http.Request) bool {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = io.WriteString(w, `{"error_msg":"service unavailable"}`)
-		return true
-	}}
-	statePath := filepath.Join(t.TempDir(), "benefit-state.json")
-	claimer := newAutoClaimer(t, fake, statePath)
+	rec := &creditRecorder{deliveryBody: `{"code":500,"message":"系统繁忙"}`}
+	claimer := newTestAutoClaimer(t, rec, filepath.Join(t.TempDir(), "benefit-state.json"))
 
 	// 模拟同一天内大量请求。
 	for i := 0; i < 30; i++ {
 		claimer.MaybeClaim()
 	}
 
-	if !waitFor(t, 3*time.Second, func() bool { return fake.postCount() >= 1 }) {
+	if !waitFor(t, 3*time.Second, func() bool { return rec.deliveryCount() >= 1 }) {
 		t.Fatal("应至少尝试一次签到")
 	}
 	waitIdle(t, claimer)
 
-	if got := fake.postCount(); got != 1 {
+	if got := rec.deliveryCount(); got != 1 {
 		t.Errorf("失败退避失效，30 个请求发起 %d 次签到，期望 1 次", got)
 	}
 	if err := claimer.State().LastError; err == "" {
@@ -259,13 +210,8 @@ func TestFailureBackoff(t *testing.T) {
 
 // TestFailureRetriesAfterBackoff 验证退避时间过后会重试。
 func TestFailureRetriesAfterBackoff(t *testing.T) {
-	fake := &fakeClaimServer{respond: func(w http.ResponseWriter, r *http.Request) bool {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = io.WriteString(w, `{"error_msg":"down"}`)
-		return true
-	}}
-	statePath := filepath.Join(t.TempDir(), "benefit-state.json")
-	claimer := newAutoClaimer(t, fake, statePath)
+	rec := &creditRecorder{deliveryBody: `{"code":500,"message":"down"}`}
+	claimer := newTestAutoClaimer(t, rec, filepath.Join(t.TempDir(), "benefit-state.json"))
 
 	// 用可控时钟模拟时间流逝。
 	var nowMs atomic.Int64
@@ -274,33 +220,33 @@ func TestFailureRetriesAfterBackoff(t *testing.T) {
 	claimer.now = func() time.Time { return time.UnixMilli(nowMs.Load()) }
 
 	claimer.MaybeClaim()
-	if !waitFor(t, 3*time.Second, func() bool { return fake.postCount() == 1 }) {
+	if !waitFor(t, 3*time.Second, func() bool { return rec.deliveryCount() == 1 }) {
 		t.Fatal("首次尝试未发生")
 	}
+	waitIdle(t, claimer)
 
 	// 未过退避期：不应重试。
 	claimer.MaybeClaim()
 	waitIdle(t, claimer)
-	if got := fake.postCount(); got != 1 {
+	if got := rec.deliveryCount(); got != 1 {
 		t.Errorf("退避期内不应重试, 次数 = %d", got)
 	}
 
 	// 越过退避期：应重试。
+	rec.mu.Lock()
+	rec.deliveryBody = deliveryJSON(dailyELIGIBLE)
+	rec.mu.Unlock()
 	nowMs.Store(base.Add(retryBackoff + time.Minute).UnixMilli())
 	claimer.MaybeClaim()
-	if !waitFor(t, 3*time.Second, func() bool { return fake.postCount() == 2 }) {
-		t.Errorf("退避期过后应重试, 次数 = %d", fake.postCount())
+	if !waitFor(t, 3*time.Second, func() bool { return rec.deliveryCount() == 2 }) {
+		t.Errorf("退避期过后应重试, 次数 = %d", rec.deliveryCount())
 	}
 }
 
 // TestAlreadyClaimedTreatedAsSuccess 验证「今日已领取」类业务错误按成功处理。
 func TestAlreadyClaimedTreatedAsSuccess(t *testing.T) {
-	fake := &fakeClaimServer{respond: func(w http.ResponseWriter, r *http.Request) bool {
-		_, _ = io.WriteString(w, `{"error_code":"0001","error_msg":"today already claimed"}`)
-		return true
-	}}
-	statePath := filepath.Join(t.TempDir(), "benefit-state.json")
-	claimer := newAutoClaimer(t, fake, statePath)
+	rec := &creditRecorder{deliveryBody: `{"code":1,"message":"today already claimed"}`}
+	claimer := newTestAutoClaimer(t, rec, filepath.Join(t.TempDir(), "benefit-state.json"))
 
 	claimer.MaybeClaim()
 	if !waitFor(t, 3*time.Second, func() bool {
@@ -308,20 +254,14 @@ func TestAlreadyClaimedTreatedAsSuccess(t *testing.T) {
 	}) {
 		t.Fatal("「今日已领取」应被识别为已签到")
 	}
-	// 等待状态落盘，避免与后续断言竞态。
-	if !waitFor(t, 3*time.Second, func() bool {
-		raw, err := os.ReadFile(statePath)
-		return err == nil && len(raw) > 0
-	}) {
-		t.Fatal("状态未落盘")
-	}
+	waitIdle(t, claimer)
 
 	// 识别为成功后，当天不再重试。
 	for i := 0; i < 5; i++ {
 		claimer.MaybeClaim()
 	}
 	waitIdle(t, claimer)
-	if got := fake.postCount(); got != 1 {
+	if got := rec.deliveryCount(); got != 1 {
 		t.Errorf("识别为已签到后不应重试, 次数 = %d", got)
 	}
 	if claimer.State().LastError != "" {
@@ -390,12 +330,11 @@ func TestIsAlreadyClaimed(t *testing.T) {
 
 // TestConcurrentMaybeClaimTriggersOnlyOne 验证并发调用下只会签一次。
 func TestConcurrentMaybeClaimTriggersOnlyOne(t *testing.T) {
-	fake := &fakeClaimServer{respond: func(w http.ResponseWriter, r *http.Request) bool {
-		time.Sleep(50 * time.Millisecond)
-		return false
-	}}
-	statePath := filepath.Join(t.TempDir(), "benefit-state.json")
-	claimer := newAutoClaimer(t, fake, statePath)
+	rec := &creditRecorder{
+		deliveryBody: deliveryJSON(dailyELIGIBLE),
+		deliveryHook: func() { time.Sleep(50 * time.Millisecond) },
+	}
+	claimer := newTestAutoClaimer(t, rec, filepath.Join(t.TempDir(), "benefit-state.json"))
 
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
@@ -407,20 +346,20 @@ func TestConcurrentMaybeClaimTriggersOnlyOne(t *testing.T) {
 	}
 	wg.Wait()
 
-	if !waitFor(t, 3*time.Second, func() bool { return fake.postCount() == 1 }) {
-		t.Fatalf("并发下签到次数 = %d, 期望 1", fake.postCount())
+	if !waitFor(t, 3*time.Second, func() bool { return rec.deliveryCount() == 1 }) {
+		t.Fatalf("并发下签到次数 = %d, 期望 1", rec.deliveryCount())
 	}
 	waitIdle(t, claimer)
-	if got := fake.postCount(); got != 1 {
+	if got := rec.deliveryCount(); got != 1 {
 		t.Errorf("并发下签到次数 = %d, 期望恰好 1", got)
 	}
 }
 
 // TestStateFileWrittenAtomically 验证状态文件内容合法且无临时文件残留。
 func TestStateFileWrittenAtomically(t *testing.T) {
-	fake := &fakeClaimServer{}
+	rec := &creditRecorder{deliveryBody: deliveryJSON(dailyELIGIBLE)}
 	statePath := filepath.Join(t.TempDir(), "benefit-state.json")
-	claimer := newAutoClaimer(t, fake, statePath)
+	claimer := newTestAutoClaimer(t, rec, statePath)
 
 	claimer.MaybeClaim()
 
@@ -431,6 +370,7 @@ func TestStateFileWrittenAtomically(t *testing.T) {
 	}) {
 		t.Fatal("状态文件未落盘")
 	}
+	waitIdle(t, claimer)
 
 	raw, err := os.ReadFile(statePath)
 	if err != nil {
@@ -444,7 +384,7 @@ func TestStateFileWrittenAtomically(t *testing.T) {
 		t.Error("状态文件缺少 LastSuccessDate")
 	}
 	if state.LastClaimTime == 0 {
-		t.Error("状态文件应记录 create_time")
+		t.Error("状态文件应记录签到时间")
 	}
 	if _, err := os.Stat(statePath + ".tmp"); !os.IsNotExist(err) {
 		t.Error("临时文件未清理")
@@ -471,10 +411,10 @@ func TestLoadStateHandlesBrokenFile(t *testing.T) {
 // TestDescribe 验证启动日志中的状态描述。
 func TestDescribe(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "benefit-state.json")
-	fake := &fakeClaimServer{}
+	rec := &creditRecorder{deliveryBody: deliveryJSON(dailyELIGIBLE)}
 
 	// 未签到。
-	claimer := newAutoClaimer(t, fake, statePath)
+	claimer := newTestAutoClaimer(t, rec, statePath)
 	if got := claimer.Describe(); got == "" {
 		t.Error("Describe 不应为空")
 	}
@@ -484,7 +424,7 @@ func TestDescribe(t *testing.T) {
 	if err := seed.Save(statePath); err != nil {
 		t.Fatal(err)
 	}
-	claimed := newAutoClaimer(t, fake, statePath)
+	claimed := newTestAutoClaimer(t, rec, statePath)
 	if got := claimed.Describe(); got == "" {
 		t.Error("Describe 不应为空")
 	}
@@ -497,11 +437,11 @@ func (e errString) Error() string { return string(e) }
 
 // TestMaybeClaimWithNilStatePath 验证未配置状态路径时仍能工作（只是不持久化）。
 func TestMaybeClaimWithNilStatePath(t *testing.T) {
-	fake := &fakeClaimServer{}
-	claimer := newAutoClaimer(t, fake, "")
+	rec := &creditRecorder{deliveryBody: deliveryJSON(dailyELIGIBLE)}
+	claimer := newTestAutoClaimer(t, rec, "")
 
 	claimer.MaybeClaim()
-	if !waitFor(t, 3*time.Second, func() bool { return fake.postCount() == 1 }) {
+	if !waitFor(t, 3*time.Second, func() bool { return rec.deliveryCount() == 1 }) {
 		t.Fatal("未配置状态路径时也应能签到")
 	}
 }
@@ -515,5 +455,21 @@ func TestStateSaveCreatesDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("状态文件未创建: %v", err)
+	}
+}
+
+// TestNilCreditRecordsFailure 验证未配置客户端时不会静默成功。
+func TestNilCreditRecordsFailure(t *testing.T) {
+	claimer := NewAutoClaimer(nil, filepath.Join(t.TempDir(), "benefit-state.json"), nil)
+
+	claimer.MaybeClaim()
+	waitIdle(t, claimer)
+
+	state := claimer.State()
+	if state.LastSuccessDate != "" {
+		t.Errorf("未配置客户端不应记为已签到: %+v", state)
+	}
+	if state.LastError == "" {
+		t.Error("应记录失败原因")
 	}
 }

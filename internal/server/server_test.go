@@ -23,7 +23,6 @@ func newTestCatalog(t *testing.T, models []catalog.Model) *catalog.Catalog {
 	creds := signer.New("demo-ak", "demo-sk")
 	cat := catalog.New(
 		upstream.New(creds, endpoints.CodeArtsHost()),
-		upstream.New(creds, endpoints.OpenGWHost()),
 		dir+"/models-cache.json",
 		endpoints,
 	)
@@ -38,10 +37,6 @@ func agentModel(id string) catalog.Model {
 	return catalog.Model{ID: id, Object: "model", OwnedBy: "codearts", Channel: catalog.ChannelAgent, Name: id}
 }
 
-func benefitModel(id string) catalog.Model {
-	return catalog.Model{ID: id, Object: "model", OwnedBy: "codearts", Channel: catalog.ChannelBenefit, Name: id}
-}
-
 func newTestServer(t *testing.T, models []catalog.Model) *Server {
 	t.Helper()
 	cfg := &config.Config{AK: "demo-ak", SK: "demo-sk", ListenHost: "127.0.0.1", ListenPort: 8787}
@@ -49,18 +44,14 @@ func newTestServer(t *testing.T, models []catalog.Model) *Server {
 	return New(cfg, newTestCatalog(t, models), client)
 }
 
-// newTestServerFor 按指定通道构造只含单个模型的服务。
-func newTestServerFor(t *testing.T, id, channel string) *Server {
+// newTestServerFor 构造只含单个模型的服务。
+func newTestServerFor(t *testing.T, id string) *Server {
 	t.Helper()
-	model := agentModel(id)
-	if channel == catalog.ChannelBenefit {
-		model = benefitModel(id)
-	}
-	return newTestServer(t, []catalog.Model{model})
+	return newTestServer(t, []catalog.Model{agentModel(id)})
 }
 
 func TestListModels(t *testing.T) {
-	srv := newTestServer(t, []catalog.Model{agentModel("openpangu-2.0-pro"), benefitModel("glm-5.3-flash")})
+	srv := newTestServer(t, []catalog.Model{agentModel("openpangu-2.0-pro"), agentModel("GLM-5.2")})
 
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
@@ -172,7 +163,7 @@ func TestCORSPreflight(t *testing.T) {
 // TestAutoClaimTriggeredOnRequests 验证自动签到钩子在正常请求上被触发。
 func TestAutoClaimTriggeredOnRequests(t *testing.T) {
 	var calls int
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.SetAutoClaim(func() { calls++ })
 
 	// 模型列表、单模型详情、聊天补全三个入口都应触发。
@@ -205,7 +196,7 @@ func TestAutoClaimTriggeredOnRequests(t *testing.T) {
 // TestAutoClaimNotTriggeredOnInvalidRequest 验证畸形请求不触发签到。
 func TestAutoClaimNotTriggeredOnInvalidRequest(t *testing.T) {
 	var calls int
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.SetAutoClaim(func() { calls++ })
 
 	// 非法 JSON 与未知模型都应在签到之前被拒绝。
@@ -223,7 +214,7 @@ func TestAutoClaimNotTriggeredOnInvalidRequest(t *testing.T) {
 // TestAutoClaimNotTriggeredOnMethodNotAllowed 验证错误方法不触发签到。
 func TestAutoClaimNotTriggeredOnMethodNotAllowed(t *testing.T) {
 	var calls int
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.SetAutoClaim(func() { calls++ })
 
 	srv.Handler().ServeHTTP(httptest.NewRecorder(),
@@ -236,7 +227,7 @@ func TestAutoClaimNotTriggeredOnMethodNotAllowed(t *testing.T) {
 
 // TestNoAutoClaimHookIsSafe 验证未注入钩子时不会 panic。
 func TestNoAutoClaimHookIsSafe(t *testing.T) {
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	// 不调用 SetAutoClaim，钩子为 nil。
 
 	rec := httptest.NewRecorder()
@@ -246,49 +237,12 @@ func TestNoAutoClaimHookIsSafe(t *testing.T) {
 	}
 }
 
-// TestStreamBenefitInjectsFinishReason 验证 benefit 流在缺少 finish_reason 时被补帧。
-func TestStreamBenefitInjectsFinishReason(t *testing.T) {
-	upstreamSSE := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"reasoning_content\":\"想\"}}]}\n\n" +
-		"data: [DONE]\n\n"
-
-	out := runStreamTest(t, upstreamSSE, "glm-5.3-flash", true)
-
-	if !strings.Contains(out, `"content":""`) {
-		t.Errorf("content:null 应被规范化为空字符串:\n%s", out)
-	}
-	if !strings.Contains(out, `"finish_reason":"stop"`) {
-		t.Errorf("benefit 流缺少 finish_reason 时应补帧:\n%s", out)
-	}
-	// 补帧必须在 [DONE] 之前。
-	finishIdx := strings.Index(out, `"finish_reason":"stop"`)
-	doneIdx := strings.Index(out, "data: [DONE]")
-	if finishIdx < 0 || doneIdx < 0 || finishIdx > doneIdx {
-		t.Errorf("补帧应出现在 [DONE] 之前:\n%s", out)
-	}
-}
-
-// TestStreamBenefitKeepsUpstreamFinishReason 验证上游已有 finish_reason 时不重复补帧。
-func TestStreamBenefitKeepsUpstreamFinishReason(t *testing.T) {
-	upstreamSSE := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
-		"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n" +
-		"data: [DONE]\n\n"
-
-	out := runStreamTest(t, upstreamSSE, "glm-5.3-flash", true)
-
-	if strings.Contains(out, `"id":"proxy-finish"`) {
-		t.Errorf("上游已给出 finish_reason 时不应补帧:\n%s", out)
-	}
-	if !strings.Contains(out, `"finish_reason":"length"`) {
-		t.Errorf("应保留上游 finish_reason:\n%s", out)
-	}
-}
-
 // TestStreamAgentImmediateDone 验证 agent 流即时转发 [DONE] 且不注入补帧。
 func TestStreamAgentImmediateDone(t *testing.T) {
 	upstreamSSE := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
 		"data: [DONE]\n\n"
 
-	out := runStreamTest(t, upstreamSSE, "openpangu-2.0-pro", false)
+	out := runStreamTest(t, upstreamSSE, "openpangu-2.0-pro")
 
 	if strings.Contains(out, `"id":"proxy-finish"`) {
 		t.Errorf("agent 通道不应补帧:\n%s", out)
@@ -303,7 +257,7 @@ func TestStreamAgentNormalizesOtherFinishReason(t *testing.T) {
 	upstreamSSE := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"other\"}]}\n\n" +
 		"data: [DONE]\n\n"
 
-	out := runStreamTest(t, upstreamSSE, "openpangu-2.0-pro", false)
+	out := runStreamTest(t, upstreamSSE, "openpangu-2.0-pro")
 	if !strings.Contains(out, `"finish_reason":"stop"`) {
 		t.Errorf("other 应归一化为 stop:\n%s", out)
 	}
@@ -313,14 +267,14 @@ func TestStreamAgentNormalizesOtherFinishReason(t *testing.T) {
 func TestStreamAgentAppendsDoneWhenUpstreamTruncated(t *testing.T) {
 	upstreamSSE := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"
 
-	out := runStreamTest(t, upstreamSSE, "openpangu-2.0-pro", false)
+	out := runStreamTest(t, upstreamSSE, "openpangu-2.0-pro")
 	if !strings.Contains(out, "data: [DONE]") {
 		t.Errorf("上游未发 [DONE] 时应补齐:\n%s", out)
 	}
 }
 
 // runStreamTest 用假上游跑一次流式请求，返回代理输出的 SSE 文本。
-func runStreamTest(t *testing.T, upstreamSSE, model string, benefit bool) string {
+func runStreamTest(t *testing.T, upstreamSSE, model string) string {
 	t.Helper()
 
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -330,11 +284,7 @@ func runStreamTest(t *testing.T, upstreamSSE, model string, benefit bool) string
 	}))
 	defer fake.Close()
 
-	channel := catalog.ChannelAgent
-	if benefit {
-		channel = catalog.ChannelBenefit
-	}
-	srv := newTestServerFor(t, model, channel)
+	srv := newTestServerFor(t, model)
 	// 直接把上游响应交给流式处理函数，绕开真实网络。
 	resp, err := http.Get(fake.URL)
 	if err != nil {
@@ -343,7 +293,7 @@ func runStreamTest(t *testing.T, upstreamSSE, model string, benefit bool) string
 	defer resp.Body.Close()
 
 	rec := httptest.NewRecorder()
-	srv.streamResponse(rec, resp, model, benefit)
+	srv.streamResponse(rec, resp)
 	return rec.Body.String()
 }
 
@@ -376,42 +326,18 @@ func TestChatNonStreamPassesThroughJSON(t *testing.T) {
 	}
 }
 
-// TestChatBenefitAddsSignedHeaders 验证 benefit 通道会带上三个必需头。
-func TestChatBenefitAddsSignedHeaders(t *testing.T) {
-	var seen http.Header
-	out := runChatTestWithCapture(t, "glm-5.3-flash", false,
-		`{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`,
-		"application/json", &seen)
-
-	if seen.Get("maas_type") != "benefit" {
-		t.Errorf("maas_type = %q, want benefit", seen.Get("maas_type"))
-	}
-	if seen.Get("model-id") != "glm-5.3-flash" {
-		t.Errorf("model-id = %q", seen.Get("model-id"))
-	}
-	if seen.Get("model-name") != "glm-5.3-flash" {
-		t.Errorf("model-name = %q", seen.Get("model-name"))
-	}
-	if !strings.Contains(seen.Get("Authorization"), "maas_type") {
-		t.Errorf("三个头必须参与签名: %s", seen.Get("Authorization"))
-	}
-	if out == "" {
-		t.Error("响应不应为空")
-	}
-}
-
-// TestChatAgentOmitsBenefitHeaders 验证 agent 通道不带 benefit 头。
-func TestChatAgentOmitsBenefitHeaders(t *testing.T) {
+// TestChatOmitsBenefitHeaders 验证请求不带已下线通道的 maas_type 头。
+func TestChatOmitsBenefitHeaders(t *testing.T) {
 	var seen http.Header
 	runChatTestWithCapture(t, "openpangu-2.0-pro", false,
 		`{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`,
 		"application/json", &seen)
 
 	if seen.Get("maas_type") != "" {
-		t.Errorf("agent 通道不应带 maas_type: %q", seen.Get("maas_type"))
+		t.Errorf("不应带 maas_type: %q", seen.Get("maas_type"))
 	}
 	if strings.Contains(seen.Get("Authorization"), "maas_type") {
-		t.Errorf("agent 通道签名不应包含 maas_type: %s", seen.Get("Authorization"))
+		t.Errorf("签名不应包含 maas_type: %s", seen.Get("Authorization"))
 	}
 }
 
@@ -466,7 +392,7 @@ func TestChatToolsReachUpstreamAsStream(t *testing.T) {
 	}))
 	defer fake.Close()
 
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.chatURL = fake.URL
 
 	body := `{"model":"openpangu-2.0-pro","stream":false,"messages":[{"role":"user","content":"看下目录"}],` +
@@ -516,12 +442,7 @@ func runChatTestWithCapture(t *testing.T, model string, stream bool, upstreamBod
 	}))
 	defer fake.Close()
 
-	// 依据模型名推断通道：glm-/deepseek- 视为 benefit，其余视为 agent。
-	channel := catalog.ChannelAgent
-	if strings.HasPrefix(model, "glm-") || strings.HasPrefix(model, "deepseek-") {
-		channel = catalog.ChannelBenefit
-	}
-	srv := newTestServerFor(t, model, channel)
+	srv := newTestServerFor(t, model)
 	srv.chatURL = fake.URL
 
 	payload := map[string]any{

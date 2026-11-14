@@ -3,7 +3,7 @@
 // 用法:
 //
 //	codearts2api            # 启动代理（默认 127.0.0.1:8787）
-//	codearts2api benefit    # 活动积分签到 + 免费额度签到 + 查询余额（详见 benefit 子命令）
+//	codearts2api benefit    # 活动积分签到（每日签到 + 新手礼包）
 //	codearts2api -version   # 打印版本信息
 //
 // 配置来自 .env 或环境变量：CODEARTS_AK / CODEARTS_SK。
@@ -62,12 +62,11 @@ func main() {
 func runServer(cfg *config.Config, creds *signer.Credentials) {
 	// 每个上游基址配一个绑定好签名 host 的客户端：
 	//   - 替换 BaseUrl 时 host 自动跟随新域名；
-	//   - 用代理时由 CODEARTS_BASE_HOST / CODEARTS_OPENGW_BASE_HOST 显式覆盖。
+	//   - 用代理时由 CODEARTS_BASE_HOST 显式覆盖。
 	codeArtsClient := upstream.New(creds, cfg.Endpoints.CodeArtsHost())
-	gatewayClient := upstream.New(creds, cfg.Endpoints.OpenGWHost())
 
 	// 启动时先同步一次真实模型列表（失败则回退缓存/兜底），再打印。
-	cat := catalog.New(codeArtsClient, gatewayClient, cfg.ModelCachePath, cfg.Endpoints)
+	cat := catalog.New(codeArtsClient, cfg.ModelCachePath, cfg.Endpoints)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	if !cat.Refresh(ctx) {
@@ -81,14 +80,12 @@ func runServer(cfg *config.Config, creds *signer.Credentials) {
 	var claimer *benefit.AutoClaimer
 	if cfg.AutoClaim {
 		claimer = benefit.NewAutoClaimer(
-			benefit.New(creds, cfg.Endpoints),
+			benefit.NewCredit(creds, cfg.Endpoints),
 			cfg.BenefitStatePath,
 			func(format string, args ...any) {
 				fmt.Printf("[自动签到] "+format+"\n", args...)
 			},
 		)
-		// 活动积分是当前有效的签到入口；免费额度作为附加动作 best-effort。
-		claimer.SetCredit(benefit.NewCredit(creds, cfg.Endpoints))
 		srv.SetAutoClaim(claimer.MaybeClaim)
 	}
 

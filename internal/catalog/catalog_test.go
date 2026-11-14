@@ -17,7 +17,6 @@ func newTestCatalog(t *testing.T) *Catalog {
 	creds := signer.New("demo-ak", "demo-sk")
 	return New(
 		upstream.New(creds, config.DefaultEndpoints().CodeArtsHost()),
-		upstream.New(creds, config.DefaultEndpoints().OpenGWHost()),
 		filepath.Join(t.TempDir(), "models-cache.json"),
 		config.DefaultEndpoints(),
 	)
@@ -27,19 +26,11 @@ func TestNewFallsBackWhenNoCache(t *testing.T) {
 	cat := newTestCatalog(t)
 
 	ids := cat.IDs()
-	if len(ids) != len(FallbackAgentModels)+len(FallbackBenefitModels) {
+	if len(ids) != len(FallbackAgentModels) {
 		t.Fatalf("兜底模型数量 = %d, ids = %v", len(ids), ids)
 	}
-	// 兜底列表中 agent 通道模型应被正确识别。
-	if !cat.IsAgentChannel("openpangu-2.0-pro") {
-		t.Error("openpangu-2.0-pro 应走 agent 通道")
-	}
-	// 不在已知列表中的模型按 benefit 处理。
-	if cat.IsAgentChannel("glm-5.3-flash") {
-		t.Error("glm-5.3-flash 不应被判定为 agent 通道")
-	}
-	if cat.IsAgentChannel("some-brand-new-model") {
-		t.Error("未知模型应默认按 benefit 通道处理")
+	if !cat.Contains("openpangu-2.0-pro") {
+		t.Error("openpangu-2.0-pro 应出现在兜底列表中")
 	}
 }
 
@@ -47,18 +38,15 @@ func TestSaveAndLoadCache(t *testing.T) {
 	cat := newTestCatalog(t)
 	models := []Model{
 		{ID: "openpangu-2.0-pro", Channel: ChannelAgent, Name: "盘古", ContextWindow: intPtr(524288)},
-		{ID: "glm-5.3-flash", Channel: ChannelBenefit, Name: "GLM", MaxTokens: intPtr(131072)},
+		{ID: "GLM-5.2", Channel: ChannelAgent, Name: "GLM", MaxTokens: intPtr(131072)},
 	}
 	cat.SaveCache(models)
 
 	// 新目录实例应能从缓存恢复。
 	reloaded := newTestCatalogAt(t, cat.cachePath)
 	ids := reloaded.IDs()
-	if len(ids) != 2 || ids[0] != "openpangu-2.0-pro" || ids[1] != "glm-5.3-flash" {
+	if len(ids) != 2 || ids[0] != "openpangu-2.0-pro" || ids[1] != "GLM-5.2" {
 		t.Fatalf("缓存恢复失败: %v", ids)
-	}
-	if !reloaded.IsAgentChannel("openpangu-2.0-pro") {
-		t.Error("缓存中 agent 通道信息丢失")
 	}
 
 	model, ok := reloaded.Lookup("openpangu-2.0-pro")
@@ -83,8 +71,28 @@ func TestLoadCacheToleratesLegacyChannel(t *testing.T) {
 	if !cat.Contains("GLM-5.2") {
 		t.Fatal("旧缓存未装载")
 	}
-	if !cat.IsAgentChannel("GLM-5.2") {
-		t.Error("旧缓存模型应默认视为 agent 通道")
+	if model, _ := cat.Lookup("GLM-5.2"); model.Channel != ChannelAgent {
+		t.Errorf("旧缓存模型的通道 = %q, 期望 agent", model.Channel)
+	}
+}
+
+// TestLoadCacheDropsRetiredChannel 验证旧缓存里残留的已下线通道模型被丢弃。
+func TestLoadCacheDropsRetiredChannel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "models-cache.json")
+	stale := `{"updated_at":1,"models":[` +
+		`{"id":"GLM-5.2","object":"model","owned_by":"codearts","channel":"agent","name":"GLM-5.2"},` +
+		`{"id":"glm-5.3-flash","object":"model","owned_by":"codearts","channel":"benefit","name":"glm-5.3-flash"}]}`
+	if err := os.WriteFile(path, []byte(stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cat := newTestCatalogAt(t, path)
+	if !cat.Contains("GLM-5.2") {
+		t.Error("agent 模型应保留")
+	}
+	if cat.Contains("glm-5.3-flash") {
+		t.Error("已下线通道的模型不应出现")
 	}
 }
 
@@ -131,17 +139,13 @@ func TestStoreDeduplicatesAndKeepsOrder(t *testing.T) {
 	cat := newTestCatalog(t)
 	cat.store([]Model{
 		{ID: "a", Channel: ChannelAgent},
-		{ID: "b", Channel: ChannelBenefit},
-		{ID: "a", Channel: ChannelBenefit},
+		{ID: "b", Channel: ChannelAgent},
+		{ID: "a", Channel: ChannelAgent},
 	})
 
 	ids := cat.IDs()
 	if len(ids) != 2 || ids[0] != "a" || ids[1] != "b" {
 		t.Errorf("去重或顺序错误: %v", ids)
-	}
-	// 重复项保留首次出现的通道。
-	if !cat.IsAgentChannel("a") {
-		t.Error("重复 ID 应保留首次出现的 agent 通道")
 	}
 }
 
@@ -149,7 +153,7 @@ func TestModelsReturnsDetails(t *testing.T) {
 	cat := newTestCatalog(t)
 	cat.store([]Model{
 		{ID: "a", Channel: ChannelAgent, Name: "模型A", SupportsImage: true},
-		{ID: "b", Channel: ChannelBenefit},
+		{ID: "b", Channel: ChannelAgent},
 	})
 
 	models := cat.Models()
@@ -173,7 +177,7 @@ func TestRefreshIfNeededSkipsNetworkWhenCacheFresh(t *testing.T) {
 	// 新建实例从新鲜缓存装载；此时不应再发起任何上游请求。
 	// 用一个指向不可达地址的客户端来证明这一点：一旦触网就会失败并丢失模型。
 	unreachable := upstream.New(signer.New("a", "b"), "unreachable.invalid")
-	cat := New(unreachable, unreachable, path, config.DefaultEndpoints())
+	cat := New(unreachable, path, config.DefaultEndpoints())
 	cat.RefreshIfNeeded(context.Background())
 
 	if !cat.Contains("cached-model") {
@@ -193,7 +197,6 @@ func newTestCatalogAt(t *testing.T, path string) *Catalog {
 	endpoints := config.DefaultEndpoints()
 	return New(
 		upstream.New(creds, endpoints.CodeArtsHost()),
-		upstream.New(creds, endpoints.OpenGWHost()),
 		path,
 		endpoints,
 	)

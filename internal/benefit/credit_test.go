@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"codearts2api/internal/config"
 	"codearts2api/internal/signer"
@@ -24,8 +23,10 @@ type creditRecorder struct {
 
 	// deliveryBody 可自定义投放列表响应。
 	deliveryBody string
-	// claimStatus 非 200 时用于模拟网关错误。
+	// gatewayStatus 非 200 时用于模拟网关错误。
 	gatewayStatus int
+	// deliveryHook 在投放请求到达时调用，用于模拟挂起或统计。
+	deliveryHook func()
 }
 
 func (r *creditRecorder) handler() http.Handler {
@@ -40,7 +41,11 @@ func (r *creditRecorder) handler() http.Handler {
 			r.mu.Lock()
 			r.delivery++
 			body := r.deliveryBody
+			hook := r.deliveryHook
 			r.mu.Unlock()
+			if hook != nil {
+				hook()
+			}
 			if req.URL.Query().Get("channel") != config.CreditChannel {
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = io.WriteString(w, `{"code":400,"message":"channel required"}`)
@@ -61,6 +66,12 @@ func (r *creditRecorder) handler() http.Handler {
 			http.NotFound(w, req)
 		}
 	})
+}
+
+func (r *creditRecorder) deliveryCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.delivery
 }
 
 func decodeBody(r *http.Request) map[string]any {
@@ -279,46 +290,10 @@ func TestCreditSendsPromptCenterHeaders(t *testing.T) {
 	}
 }
 
-// TestAutoClaimerPrefersCreditOverBenefit 验证积分成功时，老额度接口失败只算提示。
-func TestAutoClaimerPrefersCreditOverBenefit(t *testing.T) {
-	fake := &fakeClaimServer{respond: func(w http.ResponseWriter, r *http.Request) bool {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = io.WriteString(w, `{"error_code":"500","error_msg":"benefit offline"}`)
-		return true
-	}}
-	statePath := filepath.Join(t.TempDir(), "benefit-state.json")
-	claimer := newAutoClaimer(t, fake, statePath)
-
-	rec := &creditRecorder{deliveryBody: deliveryJSON(
-		`{"campaignId":1,"title":"每日签到","status":"ELIGIBLE","claimable":true,"benefitUnit":"CREDIT","benefitAmount":5}`)}
-	claimer.SetCredit(newTestCredit(t, rec))
-
-	claimer.MaybeClaim()
-	waitIdle(t, claimer)
-
-	state := claimer.State()
-	if state.LastSuccessDate != time.Now().Format(dateLayout) {
-		t.Errorf("积分成功应记为已签到, state = %+v", state)
-	}
-	if state.LastError != "" {
-		t.Errorf("不应残留失败: %q", state.LastError)
-	}
-	if !strings.Contains(state.LastWarning, "免费额度") {
-		t.Errorf("应记录额度失败的提示: %q", state.LastWarning)
-	}
-	if state.LastClaimTime == 0 {
-		t.Error("应记录签到完成时间")
-	}
-}
-
 // TestAutoClaimerCreditFailureKeepsRetrying 验证积分失败时按失败处理，不当成已签到。
 func TestAutoClaimerCreditFailureKeepsRetrying(t *testing.T) {
-	fake := &fakeClaimServer{}
-	statePath := filepath.Join(t.TempDir(), "benefit-state.json")
-	claimer := newAutoClaimer(t, fake, statePath)
-
 	rec := &creditRecorder{deliveryBody: `{"code":403,"message":"活动接口不可用"}`}
-	claimer.SetCredit(newTestCredit(t, rec))
+	claimer := NewAutoClaimer(newTestCredit(t, rec), filepath.Join(t.TempDir(), "benefit-state.json"), nil)
 
 	claimer.MaybeClaim()
 	waitIdle(t, claimer)
@@ -332,60 +307,16 @@ func TestAutoClaimerCreditFailureKeepsRetrying(t *testing.T) {
 	}
 }
 
-// TestAutoClaimerWithoutCreditKeepsLegacyBehavior 验证未挂积分时回到旧语义。
-func TestAutoClaimerWithoutCreditKeepsLegacyBehavior(t *testing.T) {
-	fake := &fakeClaimServer{}
-	statePath := filepath.Join(t.TempDir(), "benefit-state.json")
-	claimer := newAutoClaimer(t, fake, statePath)
-
-	claimer.MaybeClaim()
-	waitIdle(t, claimer)
-
-	state := claimer.State()
-	if state.LastSuccessDate != time.Now().Format(dateLayout) {
-		t.Errorf("旧路径成功应记为已签到: %+v", state)
-	}
-	if state.LastWarning != "" {
-		t.Errorf("旧路径不应有提示: %q", state.LastWarning)
-	}
-}
-
 // TestRunActionsCredit 验证 credit 子命令只领活动积分。
 func TestRunActionsCredit(t *testing.T) {
 	rec := &creditRecorder{deliveryBody: deliveryJSON(
 		`{"campaignId":1,"title":"每日签到","status":"ELIGIBLE","claimable":true,"benefitUnit":"CREDIT","benefitAmount":5}`)}
 	credit := newTestCredit(t, rec)
 
-	if code := runActions(t.Context(), nil, credit, "credit"); code != 0 {
+	if code := runActions(t.Context(), credit, "credit"); code != 0 {
 		t.Errorf("credit 子命令退出码 = %d, 期望 0", code)
 	}
 	if len(rec.claims) != 1 {
 		t.Errorf("应领取一次, 实际 %d", len(rec.claims))
-	}
-}
-
-// TestClaimAllToleratesOneLedgerFailure 验证两套账本只要一边成功就算成功。
-func TestClaimAllToleratesOneLedgerFailure(t *testing.T) {
-	fake := &fakeClaimServer{respond: func(w http.ResponseWriter, r *http.Request) bool {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = io.WriteString(w, `{"error_code":"500","error_msg":"benefit offline"}`)
-		return true
-	}}
-	claimer := newAutoClaimer(t, fake, filepath.Join(t.TempDir(), "benefit-state.json"))
-
-	rec := &creditRecorder{deliveryBody: deliveryJSON(
-		`{"campaignId":1,"title":"每日签到","status":"ELIGIBLE","claimable":true,"benefitUnit":"CREDIT"}`)}
-	credit := newTestCredit(t, rec)
-
-	// 额度接口挂了，但积分领到了 —— 整体不算失败。
-	if err := claimAll(t.Context(), claimer.client, credit); err != nil {
-		t.Errorf("一边成功不应返回错误: %v", err)
-	}
-
-	// 两边都挂才失败。
-	rec2 := &creditRecorder{deliveryBody: `{"code":500,"message":"积分接口挂了"}`}
-	credit2 := newTestCredit(t, rec2)
-	if err := claimAll(t.Context(), claimer.client, credit2); err == nil {
-		t.Error("两边都失败应返回错误")
 	}
 }

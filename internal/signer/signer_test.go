@@ -68,10 +68,10 @@ func TestSignedHeaderNamesSortedAndLowercase(t *testing.T) {
 		"Host":         "example.com",
 		"X-SDK-Date":   "20260101T000000Z",
 		"Content-Type": "application/json",
-		"maas_type":    "benefit",
+		"x-demo-token":  "demo",
 	}
 	got := SignedHeaderNames(headers)
-	want := "content-type;host;maas_type;x-sdk-date"
+	want := "content-type;host;x-demo-token;x-sdk-date"
 	if got != want {
 		t.Errorf("SignedHeaderNames = %q, want %q", got, want)
 	}

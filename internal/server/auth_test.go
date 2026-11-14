@@ -6,12 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"codearts2api/internal/catalog"
 )
 
 // TestAuthDisabledByDefault 验证未配置密钥时不鉴权（保持向后兼容）。
 func TestAuthDisabledByDefault(t *testing.T) {
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	// 不调用 SetAuth，Keys 为空。
 
 	rec := httptest.NewRecorder()
@@ -24,7 +23,7 @@ func TestAuthDisabledByDefault(t *testing.T) {
 
 // TestAuthRejectsMissingKey 验证缺少密钥时返回 401。
 func TestAuthRejectsMissingKey(t *testing.T) {
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.SetAuth(AuthConfig{Keys: []string{"sk-demo-1"}})
 
 	rec := httptest.NewRecorder()
@@ -43,7 +42,7 @@ func TestAuthRejectsMissingKey(t *testing.T) {
 
 // TestAuthRejectsWrongKey 验证错误密钥被拒绝。
 func TestAuthRejectsWrongKey(t *testing.T) {
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.SetAuth(AuthConfig{Keys: []string{"sk-demo-1"}})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -59,7 +58,7 @@ func TestAuthRejectsWrongKey(t *testing.T) {
 
 // TestAuthAcceptsValidKey 验证正确密钥放行。
 func TestAuthAcceptsValidKey(t *testing.T) {
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.SetAuth(AuthConfig{Keys: []string{"sk-demo-1"}})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -75,7 +74,7 @@ func TestAuthAcceptsValidKey(t *testing.T) {
 
 // TestAuthAcceptsAnyConfiguredKey 验证多密钥场景。
 func TestAuthAcceptsAnyConfiguredKey(t *testing.T) {
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.SetAuth(AuthConfig{Keys: []string{"sk-a", "sk-b", "sk-c"}})
 
 	for _, key := range []string{"sk-a", "sk-b", "sk-c"} {
@@ -91,7 +90,7 @@ func TestAuthAcceptsAnyConfiguredKey(t *testing.T) {
 
 // TestAuthAcceptsKeyWithoutBearerPrefix 验证兼容不带 Bearer 前缀的写法。
 func TestAuthAcceptsKeyWithoutBearerPrefix(t *testing.T) {
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.SetAuth(AuthConfig{Keys: []string{"sk-demo-1"}})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -107,7 +106,7 @@ func TestAuthAcceptsKeyWithoutBearerPrefix(t *testing.T) {
 
 // TestAuthBearerCaseInsensitive 验证 "bearer" 大小写不敏感。
 func TestAuthBearerCaseInsensitive(t *testing.T) {
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.SetAuth(AuthConfig{Keys: []string{"sk-demo-1"}})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -124,7 +123,7 @@ func TestAuthBearerCaseInsensitive(t *testing.T) {
 // TestAuthAllowsPreflight 验证 CORS 预检不被拦截。
 // 浏览器预检不带自定义头，拦截会导致跨域调用整体失败。
 func TestAuthAllowsPreflight(t *testing.T) {
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.SetAuth(AuthConfig{Keys: []string{"sk-demo-1"}})
 
 	rec := httptest.NewRecorder()
@@ -138,7 +137,7 @@ func TestAuthAllowsPreflight(t *testing.T) {
 // TestAuthErrorCarriesCORSHeaders 验证 401 响应也带跨域头，
 // 否则浏览器读不到错误信息，只会显示笼统的 CORS 失败。
 func TestAuthErrorCarriesCORSHeaders(t *testing.T) {
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.SetAuth(AuthConfig{Keys: []string{"sk-demo-1"}})
 
 	rec := httptest.NewRecorder()
@@ -154,7 +153,7 @@ func TestAuthErrorCarriesCORSHeaders(t *testing.T) {
 
 // TestAuthProtectsAllEndpoints 验证鉴权覆盖全部端点。
 func TestAuthProtectsAllEndpoints(t *testing.T) {
-	srv := newTestServerFor(t, "openpangu-2.0-pro", catalog.ChannelAgent)
+	srv := newTestServerFor(t, "openpangu-2.0-pro")
 	srv.SetAuth(AuthConfig{Keys: []string{"sk-demo-1"}})
 
 	cases := []struct {

@@ -11,21 +11,17 @@ import (
 	"strings"
 )
 
-// 上游端点默认值。可通过 CODEARTS_BASE_URL / CODEARTS_OPENGW_BASE_URL 覆盖
+// 上游端点默认值。可通过 CODEARTS_BASE_URL 覆盖
 // （用于私有化部署、测试替身或上游域名变更，无需重新编译）。
 const (
 	DefaultCodeArtsBaseURL = "https://snap-access.cn-north-4.myhuaweicloud.com"
-	DefaultOpenGWBaseURL   = "https://opengw.developer.huaweicloud.com"
 )
 
 // 各接口相对路径。
 const (
-	chatPath          = "/api/v2/chat/completions"
-	agentListPath     = "/v1/agent-center/agents/useragents?offset=0&limit=100"
-	agentDetailPath   = "/v1/agent-center/agents/detail"
-	benefitClaimPath  = "/api/v1/benefit/claim"
-	balancePath       = "/api/v1/user/tokens/balance"
-	gatewayConfigPath = "/api/v1/gateway/config"
+	chatPath        = "/api/v2/chat/completions"
+	agentListPath   = "/v1/agent-center/agents/useragents?offset=0&limit=100"
+	agentDetailPath = "/v1/agent-center/agents/detail"
 
 	// 活动积分（每日签到 / 新手礼包）。注意这几个端点在 CodeArts 基址的
 	// 根路径上，不带 /snap-manager 前缀。
@@ -39,30 +35,24 @@ const CreditChannel = "IDE"
 
 // Endpoints 汇总上游各接口的完整 URL。
 //
-// 单独抽出来是为了让基址可配置：调用方（catalog / benefit / server）只依赖
+// 单独抽出来是为了让基址可配置：调用方（catalog / server）只依赖
 // 这个结构，不直接引用常量，这样改域名或指向测试替身时只需换一个实例。
 type Endpoints struct {
-	// CodeArtsBase 是 CodeArts 模型与 AgentCenter 的基址。
+	// CodeArtsBase 是 CodeArts 模型、AgentCenter 与活动接口的基址。
 	CodeArtsBase string
-	// OpenGWBase 是免费额度网关（opengw）的基址。
-	OpenGWBase string
 
-	// CodeArtsSignedHost / OpenGWSignedHost 是参与签名时使用的 host。
+	// CodeArtsSignedHost 是参与签名时使用的 host。
 	//
-	// 留空表示取对应基址自身的 host（默认行为）。只有通过反向代理或中转访问
+	// 留空表示取基址自身的 host（默认行为）。只有通过反向代理或中转访问
 	// 上游时才需要设置：上游网关按它认定的域名验签，而中转域名与上游真实域名
 	// 不同，会导致验签失败（表现为 401 / APIG.0301）。
-	//
-	// 两个基址的 host 不同，因此分别配置。
 	CodeArtsSignedHost string
-	OpenGWSignedHost   string
 }
 
 // DefaultEndpoints 返回内置的官方端点。
 func DefaultEndpoints() Endpoints {
 	return Endpoints{
 		CodeArtsBase: DefaultCodeArtsBaseURL,
-		OpenGWBase:   DefaultOpenGWBaseURL,
 	}
 }
 
@@ -77,15 +67,6 @@ func (e Endpoints) AgentDetail(agentID string) string {
 	return e.CodeArtsBase + agentDetailPath + "?agent_id=" + url.QueryEscape(agentID)
 }
 
-// BenefitClaim 返回签到接口地址。
-func (e Endpoints) BenefitClaim() string { return e.OpenGWBase + benefitClaimPath }
-
-// Balance 返回额度余额接口地址。
-func (e Endpoints) Balance() string { return e.OpenGWBase + balancePath }
-
-// GatewayConfig 返回免费模型列表接口地址。
-func (e Endpoints) GatewayConfig() string { return e.OpenGWBase + gatewayConfigPath }
-
 // CreditDelivery 返回活动投放列表地址（每日签到 / 新手礼包等）。
 func (e Endpoints) CreditDelivery() string {
 	return e.CodeArtsBase + creditDeliveryPath + "?channel=" + CreditChannel
@@ -97,7 +78,7 @@ func (e Endpoints) CreditClaim() string { return e.CodeArtsBase + creditClaimPat
 // CreditConfirm 返回活动确认接口地址。
 func (e Endpoints) CreditConfirm() string { return e.CodeArtsBase + creditConfirmPath }
 
-// CodeArtsHost 返回 CodeArts 通道参与签名使用的 host。
+// CodeArtsHost 返回参与签名使用的 host。
 //
 // 优先取显式配置的 CodeArtsSignedHost（代理+host 覆盖场景）；未配置时取
 // CodeArtsBase 自身的 host（替换 BaseUrl 场景，签名自动跟随新域名）。
@@ -106,14 +87,6 @@ func (e Endpoints) CodeArtsHost() string {
 		return host
 	}
 	return hostOf(e.CodeArtsBase)
-}
-
-// OpenGWHost 返回免费额度网关参与签名使用的 host，取值规则同 CodeArtsHost。
-func (e Endpoints) OpenGWHost() string {
-	if host := strings.TrimSpace(e.OpenGWSignedHost); host != "" {
-		return host
-	}
-	return hostOf(e.OpenGWBase)
 }
 
 // hostOf 提取 URL 的 host 部分，解析失败时返回空串。
@@ -247,13 +220,6 @@ func loadEndpoints() (Endpoints, error) {
 		}
 		endpoints.CodeArtsBase = normalized
 	}
-	if raw := strings.TrimSpace(os.Getenv("CODEARTS_OPENGW_BASE_URL")); raw != "" {
-		normalized, err := normalizeBaseURL(raw)
-		if err != nil {
-			return Endpoints{}, fmt.Errorf("CODEARTS_OPENGW_BASE_URL 非法: %w", err)
-		}
-		endpoints.OpenGWBase = normalized
-	}
 
 	// 签名 host 覆盖：留空即取基址自身 host。
 	if raw := strings.TrimSpace(os.Getenv("CODEARTS_BASE_HOST")); raw != "" {
@@ -262,13 +228,6 @@ func loadEndpoints() (Endpoints, error) {
 			return Endpoints{}, fmt.Errorf("CODEARTS_BASE_HOST 非法: %w", err)
 		}
 		endpoints.CodeArtsSignedHost = normalized
-	}
-	if raw := strings.TrimSpace(os.Getenv("CODEARTS_OPENGW_BASE_HOST")); raw != "" {
-		normalized, err := normalizeSignedHost(raw)
-		if err != nil {
-			return Endpoints{}, fmt.Errorf("CODEARTS_OPENGW_BASE_HOST 非法: %w", err)
-		}
-		endpoints.OpenGWSignedHost = normalized
 	}
 
 	return endpoints, nil
