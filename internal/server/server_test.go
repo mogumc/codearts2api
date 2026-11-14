@@ -341,6 +341,53 @@ func TestChatOmitsBenefitHeaders(t *testing.T) {
 	}
 }
 
+// TestChatSendsIdentityHeaders 验证聊天请求带上游身份头，服务端才认得出客户端。
+//
+// 「客户端」列读 x-ot-client-type，缺省即 unknown；这里连带验证 CLI / IDE
+// 两种形态的取值与参与签名。
+func TestChatSendsIdentityHeaders(t *testing.T) {
+	cases := []struct {
+		mode       string
+		wantType   string
+		wantPlugin string
+		wantFunc   string
+	}{
+		{"", "CLI", "CLI", "agent-tui"},
+		{"cli", "CLI", "CLI", "agent-tui"},
+		{"ide", "IDE", "codemate_vscode", "agent-general"},
+	}
+	for _, tc := range cases {
+		var seen http.Header
+		fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			seen = r.Header.Clone()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+		}))
+
+		srv := newTestServerFor(t, "openpangu-2.0-pro")
+		srv.cfg.ClientMode = tc.mode
+		srv.chatURL = fake.URL
+
+		body := `{"model":"openpangu-2.0-pro","messages":[{"role":"user","content":"hi"}]}`
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+		fake.Close()
+
+		if got := seen.Get("x-ot-client-type"); got != tc.wantType {
+			t.Errorf("mode %q client-type = %q, want %q", tc.mode, got, tc.wantType)
+		}
+		if got := seen.Get("plugin-name"); got != tc.wantPlugin {
+			t.Errorf("mode %q plugin-name = %q, want %q", tc.mode, got, tc.wantPlugin)
+		}
+		if got := seen.Get("x-ot-function"); got != tc.wantFunc {
+			t.Errorf("mode %q x-ot-function = %q, want %q", tc.mode, got, tc.wantFunc)
+		}
+		if !strings.Contains(seen.Get("Authorization"), "x-ot-client-type") {
+			t.Errorf("mode %q 身份头必须参与签名: %s", tc.mode, seen.Get("Authorization"))
+		}
+	}
+}
+
 // TestChatUpstreamErrorReturns502 验证上游非 200 时返回 502 并透传细节。
 func TestChatUpstreamErrorReturns502(t *testing.T) {
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

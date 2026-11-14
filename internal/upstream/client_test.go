@@ -106,3 +106,70 @@ func TestDoSetsUserAgent(t *testing.T) {
 		t.Error("缺少 User-Agent")
 	}
 }
+
+// TestIdentityHeaders 验证身份头取值与官方客户端一致。
+//
+// 服务端「客户端」列只认 x-ot-client-type，取值写错会显示成 unknown 或原样回显。
+func TestIdentityHeaders(t *testing.T) {
+	cli := IdentityHeaders("")
+	if cli["x-ot-client-type"] != "CLI" {
+		t.Errorf("默认模式 client-type = %q, 期望 CLI", cli["x-ot-client-type"])
+	}
+	if cli["x-ot-function"] != "agent-tui" {
+		t.Errorf("CLI 模式 x-ot-function = %q", cli["x-ot-function"])
+	}
+	if cli["plugin-name"] != "CLI" {
+		t.Errorf("CLI 模式 plugin-name = %q", cli["plugin-name"])
+	}
+	if cli["x-ot-client-version"] == "" || cli["plugin-version"] != cli["x-ot-client-version"] {
+		t.Errorf("CLI 版本头不一致: %v", cli)
+	}
+
+	ide := IdentityHeaders("ide")
+	if ide["x-ot-client-type"] != "IDE" {
+		t.Errorf("IDE 模式 client-type = %q", ide["x-ot-client-type"])
+	}
+	if ide["plugin-name"] != "codemate_vscode" {
+		t.Errorf("IDE 模式 plugin-name = %q", ide["plugin-name"])
+	}
+	if ide["ide-name"] != "VSCode" {
+		t.Errorf("IDE 模式 ide-name = %q", ide["ide-name"])
+	}
+	// IDE 形态不该带 agent-tui 这种 CLI 专属路由。
+	if ide["x-ot-function"] == "agent-tui" {
+		t.Error("IDE 模式不应使用 agent-tui")
+	}
+}
+
+// TestIdentityUserAgent 验证 UA 跟随身份形态。
+func TestIdentityUserAgent(t *testing.T) {
+	if got := IdentityUserAgent("cli"); got != "codearts/"+cliVersion {
+		t.Errorf("CLI UA = %q", got)
+	}
+	if got := IdentityUserAgent("ide"); got != "CodeArts-Agent/"+ideVersion {
+		t.Errorf("IDE UA = %q", got)
+	}
+}
+
+// TestSetUserAgentOverrides 验证 SetUserAgent 生效且空值被忽略。
+func TestSetUserAgentOverrides(t *testing.T) {
+	var gotUA string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+
+	client := New(signer.New("demo-ak", "demo-sk"), "")
+	client.SetUserAgent("codearts/26.11.1")
+	client.SetUserAgent("   ") // 空值不应覆盖
+	resp, err := client.Do(context.Background(), http.MethodGet, server.URL+"/v1/models", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if gotUA != "codearts/26.11.1" {
+		t.Errorf("User-Agent = %q", gotUA)
+	}
+}

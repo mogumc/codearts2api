@@ -109,6 +109,10 @@ type Config struct {
 	BenefitStatePath string
 	// AutoClaim 为 true 时，代理每天首次收到请求会顺带签到一次。
 	AutoClaim bool
+	// ClientMode 决定发给上游的身份头：cli（默认，伪装码道 CLI）或 ide。
+	//
+	// 服务端用量页面的「客户端」列认的是 x-ot-client-type，缺省显示 unknown。
+	ClientMode string
 	// TrimRetry 是内容审核命中后的降级重试条数：大于 0 时只重发开头 system
 	// 提示与尾部该条数的消息，0 表示不重试。
 	TrimRetry int
@@ -157,6 +161,13 @@ func Load() (*Config, error) {
 
 	// 自动签到默认开启（关闭需显式设置 CODEARTS_AUTO_CLAIM=0/false/off/no）。
 	cfg.AutoClaim = parseBoolDefault(os.Getenv("CODEARTS_AUTO_CLAIM"), true)
+
+	// 上游身份头默认伪装成码道 CLI：服务端用量页面按它识别客户端。
+	clientMode, err := parseClientMode(os.Getenv("CODEARTS_CLIENT_MODE"))
+	if err != nil {
+		return nil, err
+	}
+	cfg.ClientMode = clientMode
 
 	// 审核降级重试默认关闭：裁掉历史会丢上下文，只在明确配置时启用。
 	if raw := strings.TrimSpace(os.Getenv("CODEARTS_TRIM_RETRY")); raw != "" {
@@ -278,6 +289,22 @@ func normalizeBaseURL(raw string) (string, error) {
 	normalized := strings.TrimSuffix(parsed.String(), "/")
 	// 去掉路径末尾的斜杠，保证与端点常量拼接后不出现 "//"。
 	return strings.TrimRight(normalized, "/"), nil
+}
+
+// parseClientMode 解析上游身份头形态，空值默认 cli。
+//
+// 只接受 cli / ide 两个已知值：写错时宁可启动失败，也不要悄悄按另一种形态
+// 发请求——身份头错了只会表现为「客户端显示不对」，很难排查。
+func parseClientMode(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return "cli", nil
+	case "cli":
+		return "cli", nil
+	case "ide":
+		return "ide", nil
+	}
+	return "", fmt.Errorf("CODEARTS_CLIENT_MODE 非法: %q（可选 cli / ide）", raw)
 }
 
 // parseBoolDefault 解析布尔环境变量，空值时返回默认值。

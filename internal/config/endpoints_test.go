@@ -333,3 +333,40 @@ func TestProxyKeysFromEnv(t *testing.T) {
 		t.Fatalf("ProxyKeys = %v", cfg.ProxyKeys)
 	}
 }
+
+// TestClientModeDefaultsToCLI 验证默认按码道 CLI 形态发身份头。
+func TestClientModeDefaultsToCLI(t *testing.T) {
+	prepareEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ClientMode != "cli" {
+		t.Errorf("ClientMode = %q, 期望 cli", cfg.ClientMode)
+	}
+}
+
+// TestClientModeOverride 验证可切回 IDE 形态。
+func TestClientModeOverride(t *testing.T) {
+	prepareEnv(t)
+	t.Setenv("CODEARTS_CLIENT_MODE", "IDE")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ClientMode != "ide" {
+		t.Errorf("ClientMode = %q, 期望 ide", cfg.ClientMode)
+	}
+}
+
+// TestClientModeRejectsUnknown 验证写错时不静默回退。
+func TestClientModeRejectsUnknown(t *testing.T) {
+	prepareEnv(t)
+	t.Setenv("CODEARTS_CLIENT_MODE", "vscode")
+
+	if _, err := Load(); err == nil {
+		t.Error("未知客户端形态应返回错误")
+	}
+}

@@ -64,6 +64,8 @@ func runServer(cfg *config.Config, creds *signer.Credentials) {
 	//   - 替换 BaseUrl 时 host 自动跟随新域名；
 	//   - 用代理时由 CODEARTS_BASE_HOST 显式覆盖。
 	codeArtsClient := upstream.New(creds, cfg.Endpoints.CodeArtsHost())
+	// 身份头与 UA 一起对齐官方客户端，服务端才会把调用记成 CLI / IDE 而不是 unknown。
+	codeArtsClient.SetUserAgent(upstream.IdentityUserAgent(cfg.ClientMode))
 
 	// 启动时先同步一次真实模型列表（失败则回退缓存/兜底），再打印。
 	cat := catalog.New(codeArtsClient, cfg.ModelCachePath, cfg.Endpoints)

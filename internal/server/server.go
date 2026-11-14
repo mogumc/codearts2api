@@ -212,9 +212,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 固定头（app-id / X-Language / Accept 等）必须参与签名，因此统一交给
-	// 上游客户端处理。
+	// 固定头（app-id / X-Language / Accept 等）与身份头都必须参与签名，
+	// 因此统一交给上游客户端处理。
 	headers := upstream.ChatHeaders("")
+	for name, value := range upstream.IdentityHeaders(s.cfg.ClientMode) {
+		headers[name] = value
+	}
 	// Chat-Id / Session-Id 在签名之后追加，不进入 SignedHeaders。
 	unsigned := map[string]string{
 		"Chat-Id":    chatID,
