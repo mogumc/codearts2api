@@ -68,7 +68,7 @@ func TestSignedHeaderNamesSortedAndLowercase(t *testing.T) {
 		"Host":         "example.com",
 		"X-SDK-Date":   "20260101T000000Z",
 		"Content-Type": "application/json",
-		"x-demo-token":  "demo",
+		"x-demo-token": "demo",
 	}
 	got := SignedHeaderNames(headers)
 	want := "content-type;host;x-demo-token;x-sdk-date"

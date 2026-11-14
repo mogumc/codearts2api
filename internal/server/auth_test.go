@@ -5,7 +5,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
 )
 
 // TestAuthDisabledByDefault 验证未配置密钥时不鉴权（保持向后兼容）。
